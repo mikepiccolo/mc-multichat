@@ -1,0 +1,50 @@
+{
+    "client_id": "demo-realtor",
+    "display_name": "Sunrise Realty",
+    "vertical": "realtor",
+    "timezone": "America/New_York",
+    "business_hours": {
+        "mon": [
+            [
+                "09:00",
+                "17:00"
+            ]
+        ],
+        "tue": [
+            [
+                "09:00",
+                "17:00"
+            ]
+        ],
+        "wed": [
+            [
+                "09:00",
+                "17:00"
+            ]
+        ],
+        "thu": [
+            [
+                "09:00",
+                "17:00"
+            ]
+        ],
+        "fri": [
+            [
+                "09:00",
+                "17:00"
+            ]
+        ]
+    },
+    "escalation_phone_e164": "+15557654321",
+    "twilio_number_e164": "+15551234567",
+    "kb_sources": [
+        {
+            "type": "url",
+            "value": "https://example.com/faq"
+        }
+    ],
+    "chat": {
+        "tone": "friendly, concise",
+        "opt_out_text": "Reply STOP to opt out."
+    }
+}

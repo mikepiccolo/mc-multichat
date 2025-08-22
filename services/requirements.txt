@@ -1,0 +1,3 @@
+No external deps required for /health.
+
+(We will add aws-lambda-powertools etc. in later steps.)

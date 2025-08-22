@@ -3,7 +3,11 @@ Multi‑Channel Chatbot — Step 1 (AWS + Terraform + Python 3.13)
 
 This step deploys:
 
-HTTP API (API Gateway v2) with GET /health → Lambda (Python 3.13)
+Multi‑Channel Chatbot — Step 1 (AWS + Terraform + Python 3.13)
+
+This step deploys:
+
+REST API (API Gateway v1) with GET /health → Lambda (Python 3.13), secured with API Key (Usage Plan).
 
 DynamoDB tables: clients, conversations, phone-routes
 
@@ -26,10 +30,13 @@ terraform apply -auto-approve \
 
 Test
 
-# Print the health URL
+# Print the URL and the generated API key value (sensitive)
 terraform output -raw health_url
-# Call it
-curl -s $(terraform output -raw health_url) | jq .
+terraform output -raw api_key_value
+
+# Call with x-api-key header
+curl -s -H "x-api-key: $(terraform output -raw api_key_value)" \
+  "$(terraform output -raw health_url)"
 
 Expected response:
 
@@ -42,7 +49,6 @@ Expected response:
 }
 
 Seed a sample client (optional)
-
 export CLIENTS_TBL=$(terraform output -raw dynamodb_table_clients)
 aws dynamodb put-item \
   --table-name "$CLIENTS_TBL" \
@@ -53,5 +59,3 @@ aws dynamodb put-item \
     "business_hours": {"S": "Mon-Fri 9:00-17:00"},
     "twilio_number_e164": {"S": "+15551234567"}
   }'
-
-  
