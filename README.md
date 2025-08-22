@@ -1,10 +1,4 @@
 # mc-multichat
-Multi‑Channel Chatbot — Step 1 (AWS + Terraform + Python 3.13)
-
-This step deploys:
-
-Multi‑Channel Chatbot — Step 1 (AWS + Terraform + Python 3.13)
-
 This step deploys:
 
 REST API (API Gateway v1) with GET /health → Lambda (Python 3.13), secured with API Key (Usage Plan).
