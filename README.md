@@ -53,3 +53,49 @@ aws dynamodb put-item \
     "business_hours": {"S": "Mon-Fri 9:00-17:00"},
     "twilio_number_e164": {"S": "+15551234567"}
   }'
+
+
+Step 2 — Postgres RDS + pgvector (dev sizing)
+
+This step creates a PostgreSQL RDS instance (dev-friendly sizing), a security group, a subnet group, and a Secrets Manager secret with connection details. You’ll enable pgvector and load the base KB schema.
+
+Deploy / Update
+
+cd infra/terraform
+# Override any of these for prod later: db_instance_class, db_publicly_accessible, db_multi_az, backup, engine version
+terraform apply -auto-approve \
+  -var "db_instance_class=db.t4g.micro" \
+  -var "db_allocated_storage_gb=20" \
+  -var "db_engine_version=16.3" \
+  -var "db_publicly_accessible=true" \
+  -var "db_backup_retention_days=0"
+
+⚠️ Dev default allows 0.0.0.0/0 on port 5432. Tighten by setting:
+
+terraform apply -auto-approve -var 'db_allow_cidrs=["YOUR.IP.ADDR.XX/32"]'
+
+Get connection details from Secrets Manager
+
+SECRET_ARN=$(terraform output -raw rds_secret_arn)
+aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" \
+  --query SecretString --output text | jq .
+
+Enable pgvector & create schema (requires psql)
+
+# Export env vars for psql from the secret
+CREDS=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text)
+export PGHOST=$(echo "$CREDS" | jq -r .host)
+export PGPORT=$(echo "$CREDS" | jq -r .port)
+export PGDATABASE=$(echo "$CREDS" | jq -r .dbname)
+export PGUSER=$(echo "$CREDS" | jq -r .username)
+export PGPASSWORD=$(echo "$CREDS" | jq -r .password)
+
+# 1) Create extension
+psql -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# 2) Create base KB schema
+psql -v ON_ERROR_STOP=1 -f ../../db/schema.sql
+
+# 3) Verify
+psql -c "\dx" | grep vector || echo "vector extension not found"
+
