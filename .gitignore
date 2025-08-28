@@ -1,2 +1,3 @@
 infra/terraform/.terraform/*
 infra/terraform/.terraform.lock.hcl
+services/kb_search/package/*

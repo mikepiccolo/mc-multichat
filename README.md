@@ -99,3 +99,63 @@ psql -v ON_ERROR_STOP=1 -f ../../db/schema.sql
 # 3) Verify
 psql -c "\dx" | grep vector || echo "vector extension not found"
 
+
+Step 2b — KB ingestion stub + search endpoint
+
+This adds:
+
+A local ingestion CLI (services/kb_ingest/ingest.py) to parse a URL or file, chunk, embed with OpenAI, and write rows into Postgres/pgvector.
+
+A search Lambda (GET /kb/search) that embeds the query, runs a similarity search over kb.chunks, and returns top‑k results. Secured by API key.
+
+1) Set your OpenAI key in Secrets Manager (one time)
+
+# Use the same name_prefix output from Terraform
+NAME_PREFIX=$(terraform output -raw name_prefix)
+aws secretsmanager put-secret-value \
+  --secret-id "$NAME_PREFIX/openai_api_key" \
+  --secret-string "$OPENAI_API_KEY"
+
+2) Deploy the search Lambda + API route
+
+cd infra/terraform
+terraform apply -auto-approve
+
+3) Ingest content (dev/local)
+
+# Install deps locally for the ingestion script
+pip install -r services/kb_ingest/requirements.txt
+
+# Fetch DB creds JSON
+SECRET_ARN=$(terraform output -raw rds_secret_arn)
+CREDS=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text)
+export PGHOST=$(echo "$CREDS" | jq -r .host)
+export PGPORT=$(echo "$CREDS" | jq -r .port)
+export PGDATABASE=$(echo "$CREDS" | jq -r .dbname)
+export PGUSER=$(echo "$CREDS" | jq -r .username)
+export PGPASSWORD=$(echo "$CREDS" | jq -r .password)
+
+# Also make OPENAI key available for local CLI
+export OPENAI_API_KEY=$(aws secretsmanager get-secret-value --secret-id "$(terraform output -raw name_prefix)/openai_api_key" --query SecretString --output text)
+
+# Example: ingest a web FAQ for the demo-realtor tenant
+python services/kb_ingest/ingest.py \
+  --client-id demo-realtor \
+  --source url --input https://example.com/faq \
+  --title "Example FAQ" \
+  --embed-dim 1536
+
+4) Test search via API
+
+API_KEY=$(terraform output -raw api_key_value)
+SEARCH_URL="$(terraform output -raw api_base_url)/kb/search?q=how%20do%20I%20list%20my%20home&client_id=demo-realtor&k=5"
+
+curl -s -H "x-api-key: $API_KEY" "$SEARCH_URL" | jq .
+
+Expected (shape):
+{
+  "ok": true,
+  "hits": [
+    {"document_id": 1, "title": "Example FAQ", "uri": "https://example.com/faq", "score": 0.09, "snippet": "…"}
+  ]
+}

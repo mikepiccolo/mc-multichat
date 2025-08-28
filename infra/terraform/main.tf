@@ -13,6 +13,10 @@ data "aws_secretsmanager_secret" "twilio_auth_token" {
     name = "${local.name_prefix}/twilio_auth_token"
 }
 
+#data "aws_secretsmanager_secret" "rds_credentials" {
+#    name = "${local.name_prefix}/rds"
+#}
+
 #Lambda artifact path for local zips
 locals {
     artifacts_dir = "${path.module}/.terraform/artifacts"
