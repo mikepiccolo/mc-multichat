@@ -1,0 +1,134 @@
+{
+  "$schema": "https://schemas.twilio.com/studio/draft/2019-09/flow-definition",
+  "description": "Shared missed-call flow with voicemail + callbacks (headerless-friendly)",
+  "initial_state": "Trigger",
+  "flags": { "allow_concurrent_calls": true },
+  "states": [
+    {
+      "name": "Trigger",
+      "type": "trigger",
+      "transitions": [
+        { "event": "incomingCall", "next": "LookupClient" }
+      ],
+      "properties": { "offset": { "x": 0, "y": 0 } }
+    },
+
+    {
+      "name": "LookupClient",
+      "type": "make-http-request",
+      "transitions": [
+        { "event": "success", "next": "DialClient" },
+        { "event": "failed", "next": "Hangup" }
+      ],
+      "properties": {
+        "method": "GET",
+        "content_type": "application/json",
+        "url": "{{API_BASE_URL}}/twilio/studio/lookup?called={{trigger.call.To}}&from={{trigger.call.From}}&token={{STUDIO_BEARER}}",
+        "parameters": [],
+        "timeout": 10,
+        "offset": { "x": 200, "y": 0 }
+      }
+    },
+
+    {
+      "name": "DialClient",
+      "type": "connect-call-to",
+      "transitions": [
+        { "event": "callCompleted", "next": "CheckDialStatus" },
+        { "event": "hangup", "next": "Hangup" }
+      ],
+      "properties": {
+        "noun": "number",
+        "to": "{{widgets.LookupClient.parsed.forward_to}}",
+        "caller_id": "{{trigger.call.To}}",
+        "timeout": 20,
+        "record": false,
+        "offset": { "x": 440, "y": 0 }
+      }
+    },
+
+    {
+      "name": "CheckDialStatus",
+      "type": "split-based-on",
+      "transitions": [
+        {
+          "event": "match",
+          "conditions": [
+            {
+              "friendly_name": "unanswered/busy/failed/canceled",
+              "arguments": ["{{widgets.DialClient.DialCallStatus}}"],
+              "type": "matches_any_of",
+              "value": "no-answer,busy,failed,canceled",
+              "next": "RecordVoicemail"
+            }
+          ]
+        },
+        { "event": "noMatch", "next": "Hangup" }
+      ],
+      "properties": {
+        "input": "{{widgets.DialClient.DialCallStatus}}",
+        "offset": { "x": 720, "y": 0 }
+      }
+    },
+
+    {
+      "name": "RecordVoicemail",
+      "type": "record-voicemail",
+      "transitions": [
+        { "event": "recordingComplete", "next": "PostVoicemail" },
+        { "event": "noAudio", "next": "NoVoicemail" },
+        { "event": "hangup", "next": "Hangup" }
+      ],
+      "properties": {
+        "max_length": 120,
+        "offset": { "x": 960, "y": 0 }
+      }
+    },
+
+    {
+      "name": "PostVoicemail",
+      "type": "make-http-request",
+      "transitions": [
+        { "event": "success", "next": "Hangup" },
+        { "event": "failed", "next": "Hangup" }
+      ],
+      "properties": {
+        "method": "POST",
+        "content_type": "application/json",
+        "url": "{{API_BASE_URL}}/twilio/studio/voicemail?token={{STUDIO_BEARER}}",
+        "body": "{\"recording_url\":\"{{widgets.RecordVoicemail.RecordingUrl}}\",\"from\":\"{{trigger.call.From}}\",\"to\":\"{{trigger.call.To}}\",\"client_id\":\"{{widgets.LookupClient.parsed.client_id}}\",\"call_sid\":\"{{trigger.call.CallSid}}\"}",
+        "timeout": 10,
+        "offset": { "x": 1200, "y": 0 }
+      }
+    },
+
+    {
+      "name": "NoVoicemail",
+      "type": "make-http-request",
+      "transitions": [
+        { "event": "success", "next": "Hangup" },
+        { "event": "failed", "next": "Hangup" }
+      ],
+      "properties": {
+        "method": "POST",
+        "content_type": "application/json",
+        "url": "{{API_BASE_URL}}/twilio/studio/no-voicemail?token={{STUDIO_BEARER}}",
+        "body": "{\"from\":\"{{trigger.call.From}}\",\"to\":\"{{trigger.call.To}}\",\"client_id\":\"{{widgets.LookupClient.parsed.client_id}}\",\"call_sid\":\"{{trigger.call.CallSid}}\"}",
+        "timeout": 10,
+        "offset": { "x": 1200, "y": 160 }
+      }
+    },
+
+    {
+      "name": "Hangup",
+      "type": "add-twiml-redirect",
+      "transitions": [],
+      "properties": {
+        "method": "GET",
+        "timeout": "0",
+        "url": "https://twimlets.com/echo?Twiml=%3CResponse%3E%3CHangup%2F%3E%3C%2FResponse%3E",
+        "offset": { "x": 1440, "y": 0 }
+      }
+    }
+  ]
+}
