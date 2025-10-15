@@ -159,3 +159,30 @@ Expected (shape):
     {"document_id": 1, "title": "Example FAQ", "uri": "https://example.com/faq", "score": 0.09, "snippet": "…"}
   ]
 }
+
+Step 3:
+
+# 1) Put Twilio creds & bearer into Secrets Manager (once)
+NAME_PREFIX=$(terraform output -raw name_prefix)
+aws secretsmanager put-secret-value --secret-id "$NAME_PREFIX/twilio_account_sid" --secret-string "$TWILIO_ACCOUNT_SID"
+aws secretsmanager put-secret-value --secret-id "$NAME_PREFIX/twilio_auth_token"   --secret-string "$TWILIO_AUTH_TOKEN"
+# studio_bearer already auto-created, but you can override if you want a specific value:
+# aws secretsmanager put-secret-value --secret-id "$NAME_PREFIX/studio_bearer" --secret-string "your-long-random-token"
+
+# 2) Deploy new Lambda + routes
+cd infra/terraform
+terraform apply -auto-approve
+
+# 3) Provision a client & buy number
+export API_BASE_URL=$(terraform output -raw api_base_url)
+export APIGW_API_KEY=$(terraform output -raw api_key_value)
+export NAME_PREFIX=$(terraform output -raw name_prefix)
+python scripts/provision_client.py \
+  --client-id demo-realtor \
+  --display-name "Sunrise Realty" \
+  --area-code 973 \
+  --forward-to +15557654321
+
+# 4) Test the flow
+# Call the new Twilio number. Let it ring out -> voicemail -> transcript texted to client & ack to caller.
+# Or hang up with no voicemail -> missed-call SMS still goes out.

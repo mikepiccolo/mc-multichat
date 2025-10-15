@@ -1,0 +1,83 @@
+<!-- REMOVE EVERYTHING BETWEEN THE LINES BELOW BEFORE UPLOADING
+Placeholder reference (fill these before uploading)
+
+{{BRAND_NAME}} — Your customer’s brand (the sender)
+
+{{PROGRAM_NAME}} — e.g., “Sunrise Realty Text Updates”
+
+{{PROGRAM_PURPOSE}} — short plain-English purpose (“appointment reminders, follow-ups, and service updates”)
+
+{{SENDER_NUMBER}} — the A2P 10DLC number E.164 (or Messaging Service name)
+
+{{OPTIN_KEYWORD}} — e.g., HELLO
+
+{{IVR_DIGIT}} — e.g., 1
+
+{{OPTIN_URL}} — if you use a web form
+
+{{MESSAGE_FREQUENCY}} — e.g., “up to 4 msgs/month” or “message frequency varies”
+
+{{PRIVACY_URL}} — full URL to the privacy page (the second template)
+
+{{SUPPORT_EMAIL}}, {{SUPPORT_PHONE}}, {{POSTAL_ADDRESS}}
+
+{{LAST_UPDATED_ISO}} — e.g., 2025-09-30 
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{{BRAND_NAME}} – SMS Terms & Conditions</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; line-height: 1.55; color: #111; margin: 0; padding: 2rem; max-width: 760px; }
+    h1, h2 { line-height: 1.2; }
+    small, .muted { color: #555; }
+    a { color: #0645AD; }
+    ul { padding-left: 1.2rem; }
+    hr { border: 0; height: 1px; background: #eee; margin: 2rem 0; }
+    .foot { margin-top: 2rem; font-size: .95rem; color: #444; }
+  </style>
+</head>
+<body>
+  <h1>{{BRAND_NAME}} – SMS Terms &amp; Conditions</h1>
+  <p class="muted">Program: <strong>{{PROGRAM_NAME}}</strong> • Short/Long Code: <strong>{{SENDER_NUMBER}}</strong> • Last updated: <strong>{{LAST_UPDATED_ISO}}</strong></p>
+
+  <p>{{BRAND_NAME}} (“we”, “our”) offers a text messaging program, <strong>{{PROGRAM_NAME}}</strong>, to provide {{PROGRAM_PURPOSE}} (e.g., “appointment reminders, follow-ups, and service updates”). By opting in, you agree to these SMS Terms &amp; Conditions.</p>
+
+  <h2>1) Opt-In</h2>
+  <p>You may opt in by any of the following methods (as applicable to your account):</p>
+  <ul>
+    <li><strong>Keyword:</strong> Text <strong>{{OPTIN_KEYWORD}}</strong> to <strong>{{SENDER_NUMBER}}</strong>.</li>
+    <li><strong>IVR/Call:</strong> During a call, press <strong>{{IVR_DIGIT}}</strong> to receive a text message from us.</li>
+    <li><strong>Web Form:</strong> Check the SMS consent box and submit your mobile number at <a href="{{OPTIN_URL}}">{{OPTIN_URL}}</a>.</li>
+  </ul>
+  <p>By opting in, you confirm you are the subscriber or customary user of the mobile number provided and you consent to receive text messages from {{BRAND_NAME}}.</p>
+
+  <h2>2) Message Frequency</h2>
+  <p>Message frequency varies, but will typically be <strong>{{MESSAGE_FREQUENCY}}</strong> (e.g., “up to 4 msgs/month”). <strong>Msg&amp;Data rates may apply.</strong></p>
+
+  <h2>3) Opt-Out &amp; Help</h2>
+  <p>You may opt out at any time by replying <strong>STOP</strong>. You may receive a final confirmation message. For help, reply <strong>HELP</strong> or contact us at <a href="mailto:{{
+SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a> or {{SUPPORT_PHONE}}.</p>
+
+  <h2>4) Supported Carriers</h2>
+  <p>Message delivery may be subject to your carrier’s coverage. <em>Carriers are not liable for delayed or undelivered messages.</em></p>
+
+  <h2>5) Eligibility</h2>
+  <p>You must be at least 18 years old or have the consent of a parent/guardian. SMS is available only to subscribers of supported U.S. carriers with compatible devices.</p>
+
+  <h2>6) Privacy</h2>
+  <p>Your use of the program is subject to our <a href="{{PRIVACY_URL}}">Privacy Policy</a>. <strong>No mobile information will be shared with third parties/affiliates for marketing/promotional purposes. This includes your text messaging originator opt-in data and consent; all will not be shared with any third parties.</strong> Information may be shared with vendors who perform services on our behalf (e.g., message transmission) under appropriate agreements.</p>
+
+  <h2>7) Changes to Terms</h2>
+  <p>We may update these Terms from time to time. Material changes will be indicated by updating the “Last updated” date above.</p>
+
+  <h2>8) Contact</h2>
+  <p>{{BRAND_NAME}} • {{POSTAL_ADDRESS}} • <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a> • {{SUPPORT_PHONE}}</p>
+
+  <hr />
+  <p class="foot">By opting in, you agree to receive text messages from {{BRAND_NAME}} at the mobile number you provided. Message frequency varies. <strong>Msg&amp;Data rates may apply.</strong> Reply STOP to opt out, HELP for help.</p>
+</body>
+</html>

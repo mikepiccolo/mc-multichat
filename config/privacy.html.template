@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{{BRAND_NAME}} – Privacy Policy (SMS Program)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; line-height: 1.55; color: #111; margin: 0; padding: 2rem; max-width: 760px; }
+    h1, h2 { line-height: 1.2; }
+    small, .muted { color: #555; }
+    a { color: #0645AD; }
+    ul { padding-left: 1.2rem; }
+    hr { border: 0; height: 1px; background: #eee; margin: 2rem 0; }
+  </style>
+</head>
+<body>
+  <h1>{{BRAND_NAME}} – Privacy Policy (SMS Program)</h1>
+  <p class="muted">Program: <strong>{{PROGRAM_NAME}}</strong> • Last updated: <strong>{{LAST_UPDATED_ISO}}</strong></p>
+
+  <p>{{BRAND_NAME}} (“we”, “our”) operates the <strong>{{PROGRAM_NAME}}</strong> text messaging program to provide {{PROGRAM_PURPOSE}}. This Privacy Policy describes how we collect, use, and protect information in connection with the program.</p>
+
+  <h2>Information We Collect</h2>
+  <ul>
+    <li><strong>Contact data:</strong> mobile phone number, name (if provided).</li>
+    <li><strong>Consent records:</strong> opt-in method (keyword, IVR, web), timestamp, Call SID or submission metadata.</li>
+    <li><strong>Message metadata:</strong> send/receive timestamps, delivery status, carrier information.</li>
+    <li><strong>Voicemail transcripts (if applicable):</strong> audio recording URL and transcription text.</li>
+  </ul>
+
+  <h2>How We Use Information</h2>
+  <ul>
+    <li>To send you program messages (e.g., reminders, follow-ups, service updates).</li>
+    <li>To respond to your inquiries and provide support.</li>
+    <li>To maintain legal/consent records and comply with applicable laws.</li>
+    <li>To monitor performance, prevent fraud/abuse, and improve the program.</li>
+  </ul>
+
+  <h2>Sharing &amp; Disclosure</h2>
+  <p><strong>No mobile information will be shared with third parties/affiliates for marketing/promotional purposes.</strong> This includes your text messaging originator opt-in data and consent; <strong>all will not be shared with any third parties.</strong></p>
+  <p>We may share information with service providers who help us operate the program (e.g., messaging platforms and cloud providers) under agreements requiring them to protect your information and use it only to provide services to us. We may disclose information as required by law, to protect rights and safety, or in connection with a business transaction.</p>
+
+  <h2>Your Choices</h2>
+  <ul>
+    <li><strong>Opt-out:</strong> Reply <strong>STOP</strong> to stop receiving messages.</li>
+    <li><strong>Help:</strong> Reply <strong>HELP</strong> for assistance or contact <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>.</li>
+    <li><strong>Updates:</strong> Contact us to update your contact details or preferences.</li>
+  </ul>
+
+  <h2>Data Retention</h2>
+  <p>We retain information for as long as needed to provide the program and for a reasonable period thereafter to maintain consent and compliance records, resolve disputes, and enforce agreements.</p>
+
+  <h2>Security</h2>
+  <p>We use reasonable administrative, technical, and physical safeguards appropriate to the nature of the information we process. However, no method of transmission or storage is completely secure.</p>
+
+  <h2>Children’s Privacy</h2>
+  <p>The program is not directed to children under 13. If we learn that we have collected information from a child under 13, we will take appropriate steps to delete it.</p>
+
+  <h2>International Users</h2>
+  <p>The program is intended for users in the United States.</p>
+
+  <h2>Changes to This Policy</h2>
+  <p>We may update this Privacy Policy from time to time. Material changes will be indicated by updating the “Last updated” date above.</p>
+
+  <h2>Contact Us</h2>
+  <p>{{BRAND_NAME}} • {{POSTAL_ADDRESS}} • <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a> • {{SUPPORT_PHONE}}</p>
+</body>
+</html>

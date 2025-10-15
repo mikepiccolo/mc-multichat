@@ -28,7 +28,7 @@ resource "aws_lambda_function" "health" {
 
     environment {
         variables = {
-            LOG_LEVEL = "INFO"
+            LOG_LEVEL = var.log_level
         }
     }
 

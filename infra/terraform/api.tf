@@ -52,43 +52,6 @@ resource "aws_api_gateway_integration" "health_get" {
   uri                     = aws_lambda_function.health.invoke_arn
 }
 
-# Deploy and stage (var.api_stage)
-resource "aws_api_gateway_deployment" "rest_deploy" {
-  rest_api_id = aws_api_gateway_rest_api.rest.id
-
-  triggers = {
-    redeploy_hash = sha1(jsonencode({
-      health_method      = aws_api_gateway_method.health_get.id,
-      health_integration = aws_api_gateway_integration.health_get.id,
-      search_method      = aws_api_gateway_method.kb_search_get.id,
-      search_integration = aws_api_gateway_integration.kb_search_get.id
-    }))
-  }
-
-  lifecycle { create_before_destroy = true }
-}
-
-resource "aws_api_gateway_stage" "stage" {
-  rest_api_id   = aws_api_gateway_rest_api.rest.id
-  deployment_id = aws_api_gateway_deployment.rest_deploy.id
-  stage_name    = var.api_stage
-
-  access_log_settings {
-    destination_arn = aws_cloudwatch_log_group.api_gw.arn
-    format = jsonencode({ # Example JSON format for access logs
-      requestId      = "$context.requestId",
-      ip             = "$context.identity.sourceIp",
-      httpMethod     = "$context.httpMethod",
-      path           = "$context.path",
-      status         = "$context.status",
-      responseLength = "$context.responseLength"
-    })
-  }
-
-
-  tags = local.tags
-}
-
 # Allow API Gateway to invoke the Lambda
 
 resource "aws_lambda_permission" "apigw_invoke_health" {
@@ -97,59 +60,6 @@ resource "aws_lambda_permission" "apigw_invoke_health" {
   function_name = aws_lambda_function.health.arn
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_api_gateway_rest_api.rest.execution_arn}/*/*"
-}
-
-# ---- API Key + Usage Plan ----
-
-resource "random_password" "api_key" {
-  length  = 40
-  special = false
-}
-
-resource "aws_api_gateway_api_key" "default" {
-  name        = "${local.name_prefix}-default-key"
-  description = "Default API key for ${local.name_prefix}"
-  enabled     = true
-  value       = random_password.api_key.result
-  tags        = local.tags
-}
-
-resource "aws_api_gateway_usage_plan" "default" {
-  name = "${local.name_prefix}-plan"
-
-  api_stages {
-    api_id = aws_api_gateway_rest_api.rest.id
-    stage  = aws_api_gateway_stage.stage.stage_name
-  }
-
-  tags = local.tags
-}
-
-resource "aws_api_gateway_usage_plan_key" "default" {
-  key_id        = aws_api_gateway_api_key.default.id
-  key_type      = "API_KEY"
-  usage_plan_id = aws_api_gateway_usage_plan.default.id
-}
-
-output "api_base_url" {
-  value = "https://${aws_api_gateway_rest_api.rest.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.stage.stage_name}"
-}
-
-output "health_url" {
-  value = "https://${aws_api_gateway_rest_api.rest.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.stage.stage_name}/health"
-}
-
-output "rest_api_id" {
-  value = aws_api_gateway_rest_api.rest.id
-}
-
-output "api_key_value" {
-  value     = aws_api_gateway_api_key.default.value
-  sensitive = true
-}
-
-output "api_key_id" {
-  value = aws_api_gateway_api_key.default.id
 }
 
 # /kb/search route (GET)
@@ -189,4 +99,211 @@ resource "aws_lambda_permission" "apigw_invoke_kb_search" {
   function_name = aws_lambda_function.kb_search.arn
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_api_gateway_rest_api.rest.execution_arn}/*/*"
+}
+
+# /twilio/studio routes (API key required)
+resource "aws_api_gateway_resource" "twilio" {
+  rest_api_id = aws_api_gateway_rest_api.rest.id
+  parent_id   = aws_api_gateway_rest_api.rest.root_resource_id
+  path_part   = "twilio"
+}
+
+resource "aws_api_gateway_resource" "studio" {
+  rest_api_id = aws_api_gateway_rest_api.rest.id
+  parent_id   = aws_api_gateway_resource.twilio.id
+  path_part   = "studio"
+}
+
+# GET /twilio/studio/lookup
+resource "aws_api_gateway_resource" "studio_lookup" {
+  rest_api_id = aws_api_gateway_rest_api.rest.id
+  parent_id   = aws_api_gateway_resource.studio.id
+  path_part   = "lookup"
+}
+resource "aws_api_gateway_method" "studio_lookup_get" {
+  rest_api_id      = aws_api_gateway_rest_api.rest.id
+  resource_id      = aws_api_gateway_resource.studio_lookup.id
+  http_method      = "GET"
+  authorization    = "NONE"
+  api_key_required = false
+}
+resource "aws_api_gateway_integration" "studio_lookup_get" {
+  rest_api_id             = aws_api_gateway_rest_api.rest.id
+  resource_id             = aws_api_gateway_resource.studio_lookup.id
+  http_method             = aws_api_gateway_method.studio_lookup_get.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.twilio_studio.invoke_arn
+}
+
+# POST /twilio/studio/voicemail
+resource "aws_api_gateway_resource" "studio_voicemail" {
+  rest_api_id = aws_api_gateway_rest_api.rest.id
+  parent_id   = aws_api_gateway_resource.studio.id
+  path_part   = "voicemail"
+}
+resource "aws_api_gateway_method" "studio_voicemail_post" {
+  rest_api_id      = aws_api_gateway_rest_api.rest.id
+  resource_id      = aws_api_gateway_resource.studio_voicemail.id
+  http_method      = "POST"
+  authorization    = "NONE"
+  api_key_required = false
+}
+resource "aws_api_gateway_integration" "studio_voicemail_post" {
+  rest_api_id             = aws_api_gateway_rest_api.rest.id
+  resource_id             = aws_api_gateway_resource.studio_voicemail.id
+  http_method             = aws_api_gateway_method.studio_voicemail_post.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.twilio_studio.invoke_arn
+}
+
+# POST /twilio/studio/no-voicemail
+resource "aws_api_gateway_resource" "studio_novoicemail" {
+  rest_api_id = aws_api_gateway_rest_api.rest.id
+  parent_id   = aws_api_gateway_resource.studio.id
+  path_part   = "no-voicemail"
+}
+resource "aws_api_gateway_method" "studio_novoicemail_post" {
+  rest_api_id      = aws_api_gateway_rest_api.rest.id
+  resource_id      = aws_api_gateway_resource.studio_novoicemail.id
+  http_method      = "POST"
+  authorization    = "NONE"
+  api_key_required = false
+}
+resource "aws_api_gateway_integration" "studio_novoicemail_post" {
+  rest_api_id             = aws_api_gateway_rest_api.rest.id
+  resource_id             = aws_api_gateway_resource.studio_novoicemail.id
+  http_method             = aws_api_gateway_method.studio_novoicemail_post.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.twilio_studio.invoke_arn
+}
+
+# POST /twilio/studio/consent
+resource "aws_api_gateway_resource" "studio_consent" {
+  rest_api_id = aws_api_gateway_rest_api.rest.id
+  parent_id   = aws_api_gateway_resource.studio.id
+  path_part   = "consent"
+}
+
+resource "aws_api_gateway_method" "studio_consent_post" {
+  rest_api_id      = aws_api_gateway_rest_api.rest.id
+  resource_id      = aws_api_gateway_resource.studio_consent.id
+  http_method      = "POST"
+  authorization    = "NONE"
+  api_key_required = false
+}
+
+resource "aws_api_gateway_integration" "studio_consent_post" {
+  rest_api_id             = aws_api_gateway_rest_api.rest.id
+  resource_id             = aws_api_gateway_resource.studio_consent.id
+  http_method             = aws_api_gateway_method.studio_consent_post.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.twilio_studio.invoke_arn
+}
+
+resource "aws_lambda_permission" "apigw_invoke_twilio_studio" {
+  statement_id  = "AllowInvokeByAPIGatewayTwilioStudio"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.twilio_studio.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.rest.execution_arn}/*/*"
+}
+
+# ---- API Key + Usage Plan ----
+
+resource "random_password" "api_key" {
+  length  = 40
+  special = false
+}
+
+resource "aws_api_gateway_api_key" "default" {
+  name        = "${local.name_prefix}-default-key"
+  description = "Default API key for ${local.name_prefix}"
+  enabled     = true
+  value       = random_password.api_key.result
+  tags        = local.tags
+}
+
+resource "aws_api_gateway_usage_plan" "default" {
+  name = "${local.name_prefix}-plan"
+
+  api_stages {
+    api_id = aws_api_gateway_rest_api.rest.id
+    stage  = aws_api_gateway_stage.stage.stage_name
+  }
+
+  tags = local.tags
+}
+
+resource "aws_api_gateway_usage_plan_key" "default" {
+  key_id        = aws_api_gateway_api_key.default.id
+  key_type      = "API_KEY"
+  usage_plan_id = aws_api_gateway_usage_plan.default.id
+}
+
+# Redeploy to pick up the new routes
+resource "aws_api_gateway_deployment" "rest_deploy" {
+  rest_api_id = aws_api_gateway_rest_api.rest.id
+  triggers = {
+    redeploy_hash = sha1(jsonencode({
+      health_method      = aws_api_gateway_method.health_get.id,
+      health_integration = aws_api_gateway_integration.health_get.id,
+      search_method      = aws_api_gateway_method.kb_search_get.id,
+      search_integration = aws_api_gateway_integration.kb_search_get.id,
+      lookup_method      = aws_api_gateway_method.studio_lookup_get.id,
+      lookup_integration = aws_api_gateway_integration.studio_lookup_get.id,
+      vm_method          = aws_api_gateway_method.studio_voicemail_post.id,
+      vm_integration     = aws_api_gateway_integration.studio_voicemail_post.id,
+      nvm_method         = aws_api_gateway_method.studio_novoicemail_post.id,
+      nvm_integration    = aws_api_gateway_integration.studio_novoicemail_post.id
+      consent_method     = aws_api_gateway_method.studio_consent_post.id,
+      consent_integration= aws_api_gateway_integration.studio_consent_post.id
+    }))
+  }
+  lifecycle { create_before_destroy = true }
+}
+
+resource "aws_api_gateway_stage" "stage" {
+  rest_api_id   = aws_api_gateway_rest_api.rest.id
+  deployment_id = aws_api_gateway_deployment.rest_deploy.id
+  stage_name    = var.api_stage
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.api_gw.arn
+    format = jsonencode({ # Example JSON format for access logs
+      requestId      = "$context.requestId",
+      ip             = "$context.identity.sourceIp",
+      httpMethod     = "$context.httpMethod",
+      path           = "$context.path",
+      status         = "$context.status",
+      responseLength = "$context.responseLength"
+    })
+  }
+
+
+  tags = local.tags
+}
+# Outputs
+output "api_base_url" {
+  value = "https://${aws_api_gateway_rest_api.rest.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.stage.stage_name}"
+}
+
+output "health_url" {
+  value = "https://${aws_api_gateway_rest_api.rest.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.stage.stage_name}/health"
+}
+
+output "rest_api_id" {
+  value = aws_api_gateway_rest_api.rest.id
+}
+
+output "api_key_value" {
+  value     = aws_api_gateway_api_key.default.value
+  sensitive = true
+}
+
+output "api_key_id" {
+  value = aws_api_gateway_api_key.default.id
 }

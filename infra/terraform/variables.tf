@@ -84,3 +84,27 @@ variable "db_allow_cidrs" {
   type        = list(string)
   default     = ["0.0.0.0/0"] # tighten in prod
 }
+
+variable "log_level" {
+  description = "Log level for the application (DEBUG, INFO, WARNING, ERROR)"
+  type        = string
+  default     = "INFO"
+}
+
+variable "twilio_sid_required" {
+  description = "Whether Twilio SID secret is required (true if using Twilio)"
+  type        = bool
+  default     = true
+}
+
+variable "default_greeting_message" {
+  description = "Default voicemail greeting message if client doesn't set one"
+  type        = string
+  default     = "Sorry we missed your call. Please leave a message after the tone."
+}
+
+variable "default_consent_message" {
+  description = "Default consent message if client doesn't set one"
+  type        = string
+  default     = "By pressing 1, you agree to receive text messages from us. Message frequency varies. Message and data rates may apply. For terms and privacy policy, visit our website. Reply STOP to opt out at any time."
+}

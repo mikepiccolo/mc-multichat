@@ -26,3 +26,27 @@ resource "aws_secretsmanager_secret_version" "rds_credentials_v" {
     password = random_password.rds_master.result
   })
 }
+
+# Twilio credentials
+resource "aws_secretsmanager_secret" "twilio_account_sid" {
+  name = "${local.name_prefix}/twilio_account_sid"
+  tags = local.tags
+}
+
+# Shared Bearer token used by Studio HTTP Request -> our API
+resource "aws_secretsmanager_secret" "studio_bearer" {
+  name = "${local.name_prefix}/studio_bearer"
+  tags = local.tags
+}
+
+# Will be set manually for security from Twilio console
+# Generate a random bearer value for convenience (you can overwrite later)
+#resource "random_password" "studio_bearer" {
+#  length  = 48
+#  special = false
+#}
+
+#resource "aws_secretsmanager_secret_version" "studio_bearer_v" {
+#  secret_id     = aws_secretsmanager_secret.studio_bearer.id
+#  secret_string = random_password.studio_bearer.result
+#}

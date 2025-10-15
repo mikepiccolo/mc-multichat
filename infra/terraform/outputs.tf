@@ -26,3 +26,15 @@ output "rds_db_name" {
 output "rds_secret_arn" {
   value = aws_secretsmanager_secret.rds_credentials.arn
 }
+
+output "twilio_account_sid_arn" {
+  value = aws_secretsmanager_secret.twilio_account_sid.arn
+}
+
+output "twilio_studio_bearer_arn" {
+  value = aws_secretsmanager_secret.studio_bearer.arn
+}
+
+output "twilio_auth_token_arn" {
+  value = local.twilio_auth_token_arn
+}

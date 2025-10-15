@@ -37,7 +37,8 @@ resource "aws_lambda_function" "kb_search" {
   runtime          = "python3.13"
   architectures    = ["arm64"]
   source_code_hash = data.archive_file.kb_search_zip.output_base64sha256
-
+  timeout = 15
+  
   logging_config {
     log_group  = aws_cloudwatch_log_group.lambda_kb_search.name
     log_format = "JSON"
@@ -48,7 +49,7 @@ resource "aws_lambda_function" "kb_search" {
       RDS_SECRET_ARN    = aws_secretsmanager_secret.rds_credentials.arn
       OPENAI_SECRET_ARN = local.openai_api_key_arn
       EMBED_DIM         = tostring(1536)
-      LOG_LEVEL         = "INFO"
+      LOG_LEVEL         = var.log_level
     }
   }
 
