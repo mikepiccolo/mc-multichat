@@ -39,16 +39,6 @@ def get_secret_json(arn: str) -> dict:
     logger.debug("Fetching JSON secret from ARN: %s", arn)
     return json.loads(get_secret(arn))
 
-# def db_conn():
-#     logger.debug("Connecting to DB");
-#     creds = get_secret_json(os.environ["RDS_SECRET_ARN"])
-#     ctx = ssl.create_default_context()
-#     return pg8000.connect(
-#         user=creds["username"], password=creds["password"],
-#         host=creds["host"], port=int(creds["port"]), database=creds["dbname"],
-#         ssl_context=ctx,
-#     )
-
 def ok(body): 
     msg = {"statusCode": 200, "headers": JSON, "body": json.dumps(body)}
     logger.info("Response: %s", json.dumps(msg))
@@ -85,17 +75,6 @@ def require_studio_token(event) -> bool:
         logger.debug("Fetched secret from bearer ARN");
     
     return hmac.compare_digest(token, expected)
-
-# 
-# def require_studio_bearer(headers) -> bool:
-#     logger.debug("Validating Studio Bearer token");
-#     """Studio HTTP Request widget does not include Twilio signatures.
-#     We protect with a shared Bearer token + API key (API Gateway)."""
-#     auth = (headers or {}).get("authorization") or (headers or {}).get("Authorization")
-#     if not auth or not auth.startswith("Bearer "): return False
-#     token = auth.split(" ", 1)[1]
-#     expected = get_secret(os.environ["STUDIO_BEARER_ARN"])
-#     return hmac.compare_digest(token, expected)
 
 # Optional: Twilio signature validation (for direct Twilio webhooks, not Studio HTTP Request)
 def twilio_valid_signature(url: str, params: dict, signature_header: str) -> bool:
@@ -221,6 +200,17 @@ def lookup_client_via_ddb(called_e164: str):
 
     return {"client_id": client_id, "forward_to": forward_to, "greeting_message": greeting_message, "consent_message": consent_message}
 
+# Helper to get last 10 digits of a phone number 
+def _last10(e164_or_any: str | None) -> str | None:
+    logger.debug("Extracting last 10 digits from: %s", e164_or_any);
+    if not e164_or_any:
+        return None
+    digs = "".join(ch for ch in e164_or_any if ch.isdigit())
+
+    last10 = digs[-10:] if len(digs) >= 10 else digs or None
+    logger.debug("Last 10 digits: %s", last10);
+    return last10
+
 # ---------- Route handlers ----------
 def handle_lookup(event):
     logger.debug("Handling lookup event: %s", json.dumps(event));
@@ -231,66 +221,20 @@ def handle_lookup(event):
     qs = event.get("queryStringParameters") or {}
     called = qs.get("called")
     caller = qs.get("from")
+    fwd    = qs.get("fwd") 
+
     if not called:
         return bad(400, "called required")
 
-    # if not called.strip().startswith("+"):
-    #     logger.debug("Prepending + to called number: %s", called);
-    #     called = "+" + called.strip()
     try:
         called = convert_to_e164(called)
         caller = convert_to_e164(caller) 
     except Exception as e:
         return bad(400, f"called number invalid: {e}")
-
-    # # Simple DynamoDB lookup:
-    # # ddb = boto3.client("dynamodb")
-    # pr_table = os.environ.get("DDB_PHONE_ROUTES", "")
-    # c_table  = os.environ.get("DDB_CLIENTS", "")
-    # if not pr_table or not c_table:
-    #     # fall back to "clients" using the "called" == twilio_number_e164
-    #     # pass
-    #     return bad(500, "Phone routes table not configured");
-
-    # logger.debug("Looking up clients table for called number: %s", called);
-    # logger.debug("DynamoDB phone routes table: %s", pr_table);
-    # # Minimal: return forward_to and client_id from "clients" table
-    # # (You likely already inserted a clients row with twilio_number_e164)
-    # ddbc = boto3.resource("dynamodb")
-    # # resp = ddbc.scan(
-    # #     TableName=c_table,
-    # #     FilterExpression="twilio_number_e164 = :n",
-    # #     ExpressionAttributeValues={":n": {"S": called}},
-    # #     Limit=1,
-    # # )
-
-    # table = ddbc.Table(pr_table)
-    # resp = table.query(
-    #     KeyConditionExpression=Key("phone_e164").eq(called),
-    # )
-
-    # logger.debug("DynamoDB query response: %s", json.dumps(resp))
-
-    # items = resp.get("Items", []) 
-    # if not items:
-    #     return bad(404, "Unknown number")
-    # item = items[0]
-    # client_id = item["client_id"]
-    # forward_to = item["escalation_phone_e164"] 
-    # # lookup client_id in clients table to get greeting_message
-    # table = ddbc.Table(c_table)
-    # resp = table.query(
-    #     KeyConditionExpression=Key("client_id").eq(client_id),
-    # )
-    # items = resp.get("Items", [])
-    # if not items:
-    #     return bad(404, "Unknown client_id")
-    
-    # item = items[0]
-    # greeting_message = item["greeting_message"] or "Please leave a message after the beep."
     
     consent = False
     looked = {}
+    skip_dial = False
 
     try :
         looked = lookup_client_via_ddb(called)
@@ -300,16 +244,53 @@ def handle_lookup(event):
         if consent_exists(looked["client_id"], caller):
             consent = True
 
+        forward_to = looked["forward_to"] or ""
+
+        # Determine whether we should skip dialing the client (to avoid loop on forwarded calls)
+        # Compare last 10 digits to tolerate formatting differences.
+        is_forwarded_from_client = (_last10(fwd) is not None) and (_last10(fwd) == _last10(forward_to))
+        skip_dial = "true" if is_forwarded_from_client else "false"
+        logger.debug("skip_dial=%s (fwd=%s, forward_to=%s)", skip_dial, fwd, forward_to);
+    
+
     except Exception as e:
         logger.error("DynamoDB lookup error: %s", e)
         return bad(500, f"DynamoDB lookup error: {e}")
     
+    # Log inbound call to conversations table for audit
+    # Do not fail on error
+    try:
+        logger.debug("Logging inbound call to conversations table for audit");
+        table = os.environ["DDB_CONVERSATIONS"]
+        pk = f"CLIENT#{looked['client_id']}#USER#{caller or 'unknown'}"
+        ts = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        boto3.client("dynamodb").put_item(
+            TableName=table,
+            Item={
+                "pk": {"S": pk},
+                "sk": {"S": f"CALL#{ts}"},
+                "gsi1pk": {"S": f"CLIENT#{looked['client_id']}"},
+                "gsi1sk": {"S": f"TS#{ts}"},
+                "type": {"S": "inbound_call"},
+                "from": {"S": caller or ""},
+                "to": {"S": called or ""},
+                "forwarded_from": {"S": fwd or ""},
+                "skip_dial": {"S": skip_dial},
+                "ts": {"S": ts},
+            }
+        )
+    except Exception:
+        logger.error("Failed to log inbound call to conversations table")
+        pass
+
     return ok({
         "ok": True,
         "client_id": looked["client_id"],
         "forward_to": looked["forward_to"],
         "called": called,
         "caller": caller,
+        "forwarded_from": fwd,
+        "skip_dial": skip_dial,
         "greeting_message": looked["greeting_message"],
         "consent_message": looked["consent_message"],
         "consent_exists": consent,
