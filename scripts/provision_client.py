@@ -2,18 +2,31 @@
 """
 Provision a new client (or update the shared Studio Flow).
 
+Step 1: Buy or attach a Twilio phone number to the shared Studio Flow
+Step 2: A2P registration
+Step 3: Update the client record in DynamoDB with the new number and A2P info
+
 Features:
-- --action {buy|attach|update|skip} controls phone nuumber action (skip)
+- --action {buy|attach|upsert|a2p|skip} controls phone number action (skip)
 -    buy: purchase a new number in the specified area code and attach to the flow
 -    attach: attach an existing Twilio number (+E164) to the flow
--    update: update client record only with twilio number.  No twilio action. 
+-    upsert: create or update client record (full record) only with twilio number.  No twilio action. 
+-    a2p: A2P registration actions, use with:
+-        --ms-sid: sets the Messaging Service SID and webhooks for A2P registration
+-        --set-webhooks: configure inbound/status webhooks on the Messaging Service  
+-        --a2p-approved: yes|no to mark the number as A2P approved
+-        --client-id: required client ID to update DDB record with new Messaging Service SID
 -    skip: no number action, no twilio action
 -
+- --client-id: sets the client ID to update in DDB (required for upsert and a2p actions)
 - --client-template sets the client template path with DDB client details (default: config/client_pack.example.json)
 - --flow-friendly-name sets the Flow FriendlyName (default: '{NAME_PREFIX}-missed-call')
 - --area-code sets area code for new number purchase (default: 973)
 - --country country for phone number, default 'US'
 - --number sets existing Twilio number to attach or update (+E164)
+- --ms-sid sets Messaging Service SID for A2P registration
+- --set-webhooks true|false to configure inbound/status webhooks on the Messaging Service
+- --a2p-approved true|false to mark number as A2P approved
 
 Env:
   NAME_PREFIX    = mc-multichat-dev (terraform output -raw name_prefix)
@@ -28,15 +41,6 @@ Usage (buy number):
     --client-template config/client_pack.example.json \
     --area-code 973 \
  
-Update number (no number purchase):
-  python scripts/provision_client.py \
-    --client-id demo-realtor \
-    --display-name "Sunrise Realty" \
-    --area-code 973 \
-    --forward-to +15557654321 \
-    --flow-action update \
-    --skip-buy-number
-
 Attach an existing number:
   python scripts/provision_client.py \
     --action attach \
@@ -44,7 +48,7 @@ Attach an existing number:
 
  Update an existing number:
   python scripts/provision_client.py \
-    --action update \
+    --action upsert \
     --number +15551234567
    
 """
@@ -194,6 +198,13 @@ def render_client_template(path: str, twilio_number_e164: str) -> str:
         raise
     return parsed #json.dumps(parsed, separators=(",", ":"))
 
+def get_tf_output(name: str) -> str:
+    import subprocess
+    return subprocess.check_output(["terraform", "output", "-raw", name], cwd="infra/terraform").decode().strip()
+
+def ddb():
+    return boto3.client("dynamodb")
+
 # ---------- DynamoDB upserts ----------
 def upsert_ddb_records(name_prefix: str, item: Any):
     ddb = boto3.client("dynamodb")
@@ -236,6 +247,48 @@ def upsert_ddb_records(name_prefix: str, item: Any):
 
     info("Upserted phone_routes row", table=phone_tbl, phone_e164=twilio_number)
 
+def update_client_record(client_id: str, msid: str | None, a2p_approved: bool | None):
+    table = os.environ.get("DDB_CLIENTS") or get_tf_output("dynamodb_table_clients")
+
+    if not table:
+        raise Exception("DDB_CLIENTS env var or terraform output is required to update client record")
+    
+    expr = []
+    names = {}
+    vals = {}
+    if msid is not None:
+        expr.append("#ms = :ms")
+        names["#ms"] = "messaging_service_sid"
+        vals[":ms"] = {"S": msid}
+    if a2p_approved is not None:
+        expr.append("#a2p = :a2p")
+        names["#a2p"] = "a2p_approved"
+        vals[":a2p"] = {"BOOL": a2p_approved}
+    if not expr:
+        return
+    ddb().update_item(
+        TableName=table,
+        Key={"client_id": {"S": client_id}},
+        UpdateExpression="SET " + ", ".join(expr),
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=vals,
+    )
+
+def set_messaging_service_webhooks(msid: str, inbound_url: str, status_url: str, sid: str, token: str):
+    # Twilio Messaging Service API (v1)
+    # Docs: inboundRequestUrl/inboundMethod/statusCallback/useInboundWebhookOnNumber
+    # https://www.twilio.com/docs/messaging/api/service-resource
+    url = f"https://messaging.twilio.com/v1/Services/{msid}"
+    data = {
+        "InboundRequestUrl": inbound_url,
+        "InboundMethod": "POST",
+        "StatusCallback": status_url,
+        "UseInboundWebhookOnNumber": "false"
+    }
+    r = requests.post(url, data=data, auth=(sid, token), timeout=20)
+    if r.status_code >= 300:
+        raise SystemExit(f"Failed to update Messaging Service: {r.status_code} {r.text}")
+    return r.json()
 
 # ---------- CLI ----------
 def parse_args() -> argparse.Namespace:
@@ -244,7 +297,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--area-code", type=int, required=False)
     ap.add_argument(
         "--action",
-        choices=["buy", "attach", "update", "skip"],
+        choices=["buy", "attach", "upsert", "a2p","skip"],
         default="skip",
         help="How to manage the client provisioning: default - skip",
     )
@@ -265,6 +318,12 @@ def parse_args() -> argparse.Namespace:
         default="US",
         help="Country for phone number (default: US)",
     )
+
+    ap.add_argument("--client-id", required=False, help="Client ID to update in DDB (required for a2p actions)")
+    ap.add_argument("--ms-sid", required=False, help="Existing Messaging Service SID to attach")
+    ap.add_argument("--set-webhooks", required=False, action="store_true", help="Configure inbound/status webhooks on the Messaging Service")
+    ap.add_argument("--a2p-approved", required=False, choices=["true","false"], help="Mark client A2P approval flag")
+
     return ap.parse_args()
 
 def convert_to_e164(number: str, country: str) -> str:
@@ -283,7 +342,7 @@ def main() -> int:
     args = parse_args()
 
     # Env
-    name_prefix = os.environ.get("NAME_PREFIX")
+    name_prefix = os.environ.get("NAME_PREFIX") or get_tf_output("name_prefix")
  
     if not name_prefix:
         error("Missing env NAME_PREFIX"); return 2
@@ -312,10 +371,53 @@ def main() -> int:
     if args.action == "skip":
         info("Skipping flow management as requested (--action skip).  No action taken.")
         return 0
-    
-    if args.action == "update":
+  
+    if args.action == "a2p":
+        if not args.client_id:
+            error("--client-id is required with --action a2p")
+            return 2
+        
+        a2p_approved: Optional[bool] = None
+        if args.a2p_approved == "true":
+            a2p_approved = True
+        elif args.a2p_approved == "false":
+            a2p_approved = False
+
+        if not args.ms_sid and not a2p_approved:
+            error("At least one of --ms-sid or --a2p-approved is required with --action a2p")
+            return 2
+        
+        if args.ms_sid and args.set_webhooks:
+            api_base = os.environ.get("API_BASE_URL") or get_tf_output("api_base_url")
+
+            if not api_base:
+                error("API_BASE_URL env var or terraform output is required to set Messaging Service webhooks")
+                return 2
+            
+            inbound_url = f"{api_base}/twilio/sms/inbound"
+            status_url  = f"{api_base}/twilio/sms/status"
+
+            info("Setting Messaging Service webhooks", msid=args.ms_sid, inbound_url=inbound_url, status_url=status_url)
+            try:
+                set_messaging_service_webhooks(args.ms_sid, inbound_url, status_url, twilio_sid, twilio_tok)
+                info("Messaging Service webhooks set", msid=args.ms_sid)
+            except Exception as e:
+                error("Failed to set Messaging Service webhooks", error=str(e))
+                return 2
+
+        try:
+            update_client_record(args.client_id, args.ms_sid, a2p_approved)
+            info("Client record updated for A2P", client_id=args.client_id, has_msid=bool(args.ms_sid), a2p_approved=a2p_approved)
+        except Exception as e:
+            error("Failed to update client record for A2P", error=str(e))
+            return 2
+        
+        return 0
+
+     # ---- Number management ----  
+    if args.action == "upsert":
         if not args.number:
-            error("--number is required with --action update")
+            error("--number is required with --action upsert")
             return 2
         
         twilio_number = convert_to_e164(args.number, country)

@@ -212,6 +212,69 @@ resource "aws_lambda_permission" "apigw_invoke_twilio_studio" {
   source_arn    = "${aws_api_gateway_rest_api.rest.execution_arn}/*/*"
 }
 
+# Inbound SMS webhook: POST /twilio/sms/inbound
+resource "aws_api_gateway_resource" "sms_root" {
+  rest_api_id = aws_api_gateway_rest_api.rest.id
+  parent_id   = aws_api_gateway_resource.twilio.id
+  path_part   = "sms"
+}
+
+resource "aws_api_gateway_resource" "sms_inbound" {
+  rest_api_id = aws_api_gateway_rest_api.rest.id
+  parent_id   = aws_api_gateway_resource.sms_root.id
+  path_part   = "inbound"
+}
+
+resource "aws_api_gateway_method" "sms_inbound_post" {
+  rest_api_id      = aws_api_gateway_rest_api.rest.id
+  resource_id      = aws_api_gateway_resource.sms_inbound.id
+  http_method      = "POST"
+  authorization    = "NONE"
+  api_key_required = false
+}
+
+resource "aws_api_gateway_integration" "sms_inbound_post" {
+  rest_api_id             = aws_api_gateway_rest_api.rest.id
+  resource_id             = aws_api_gateway_resource.sms_inbound.id
+  http_method             = aws_api_gateway_method.sms_inbound_post.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.twilio_sms.invoke_arn
+}
+
+# Status callback webhook: POST /twilio/sms/status
+resource "aws_api_gateway_resource" "sms_status" {
+  rest_api_id = aws_api_gateway_rest_api.rest.id
+  parent_id   = aws_api_gateway_resource.sms_root.id
+  path_part   = "status"
+}
+
+resource "aws_api_gateway_method" "sms_status_post" {
+  rest_api_id      = aws_api_gateway_rest_api.rest.id
+  resource_id      = aws_api_gateway_resource.sms_status.id
+  http_method      = "POST"
+  authorization    = "NONE"
+  api_key_required = false
+}
+
+resource "aws_api_gateway_integration" "sms_status_post" {
+  rest_api_id             = aws_api_gateway_rest_api.rest.id
+  resource_id             = aws_api_gateway_resource.sms_status.id
+  http_method             = aws_api_gateway_method.sms_status_post.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.twilio_sms.invoke_arn
+}
+
+# Allow API Gateway to invoke the Lambda
+resource "aws_lambda_permission" "apigw_invoke_twilio_sms" {
+  statement_id  = "AllowInvokeByAPIGatewayTwilioSMS"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.twilio_sms.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.rest.execution_arn}/*/*"
+}
+
 # ---- API Key + Usage Plan ----
 
 resource "random_password" "api_key" {
@@ -261,6 +324,11 @@ resource "aws_api_gateway_deployment" "rest_deploy" {
       nvm_integration    = aws_api_gateway_integration.studio_novoicemail_post.id
       consent_method     = aws_api_gateway_method.studio_consent_post.id,
       consent_integration= aws_api_gateway_integration.studio_consent_post.id
+      inbound_method     = aws_api_gateway_method.sms_inbound_post.id,
+      inbound_integ      = aws_api_gateway_integration.sms_inbound_post.id,
+      status_method      = aws_api_gateway_method.sms_status_post.id,
+      status_integ       = aws_api_gateway_integration.sms_status_post.id
+
     }))
   }
   lifecycle { create_before_destroy = true }
