@@ -96,7 +96,8 @@ def lambda_handler(event, context):
                     """
                     SELECT c.id as chunk_id, d.id as document_id, d.title, d.uri,
                            1 - (c.embedding <=> %s::vector) as score,  -- convert distance to similarity-ish
-                           substring(c.content for 240) as snippet
+                    --       substring(c.content for 240) as snippet
+                            c.content as snippet
                     FROM kb.chunks c
                     JOIN kb.documents d ON d.id = c.document_id
                     WHERE c.client_id = %s AND c.embedding IS NOT NULL

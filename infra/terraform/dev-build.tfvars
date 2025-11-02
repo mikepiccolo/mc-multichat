@@ -14,3 +14,9 @@ db_name = "multichatdev"
 log_level = "DEBUG"
 # secure twilio endpoints using Twilio SID
 twilio_sid_required = false
+# GPT LLM model to use
+model_name = "gpt-4o-mini"
+# Max tool loops for orchestrator
+max_tool_loops = 2
+# conversation history
+max_history_turns = "10"

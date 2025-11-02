@@ -307,6 +307,17 @@ resource "aws_api_gateway_usage_plan_key" "default" {
   usage_plan_id = aws_api_gateway_usage_plan.default.id
 }
 
+# Store the REST API key in Secrets Manager so our Lambdas can call internal endpoints securely
+resource "aws_secretsmanager_secret" "apigw_api_key" {
+  name = "${local.name_prefix}/apigw_api_key"
+  tags = local.tags
+}
+
+resource "aws_secretsmanager_secret_version" "apigw_api_key_v" {
+  secret_id     = aws_secretsmanager_secret.apigw_api_key.id
+  secret_string = aws_api_gateway_api_key.default.value
+}
+
 # Redeploy to pick up the new routes
 resource "aws_api_gateway_deployment" "rest_deploy" {
   rest_api_id = aws_api_gateway_rest_api.rest.id
@@ -327,8 +338,7 @@ resource "aws_api_gateway_deployment" "rest_deploy" {
       inbound_method     = aws_api_gateway_method.sms_inbound_post.id,
       inbound_integ      = aws_api_gateway_integration.sms_inbound_post.id,
       status_method      = aws_api_gateway_method.sms_status_post.id,
-      status_integ       = aws_api_gateway_integration.sms_status_post.id
-
+      status_integ       = aws_api_gateway_integration.sms_status_post.id,
     }))
   }
   lifecycle { create_before_destroy = true }

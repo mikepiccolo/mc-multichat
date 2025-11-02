@@ -3,3 +3,4 @@ infra/terraform/.terraform.lock.hcl
 services/kb_search/package
 services/twilio_studio/package
 services/twilio_sms/package
+services/chat_orchestrator/package

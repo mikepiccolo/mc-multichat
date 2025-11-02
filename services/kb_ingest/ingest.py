@@ -7,6 +7,21 @@ Usage:
 Env:
   PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD  (from Secrets Manager)
   OPENAI_API_KEY                                   (pulled locally for CLI)
+
+Get connection details from Secrets Manager
+
+SECRET_ARN=$(terraform output -raw rds_secret_arn)
+aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" \
+  --query SecretString --output text | jq .
+
+Enable pgvector & create schema (requires psql)
+
+# Export env vars for psql from the secret
+CREDS=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text)
+
+# Also make OPENAI key available for local CLI
+export OPENAI_API_KEY=$(aws secretsmanager get-secret-value --secret-id "$(terraform output -raw name_prefix)/openai_api_key" --query SecretString --output text)
+
 """
 from __future__ import annotations
 
@@ -37,10 +52,25 @@ def load_text_from_url(url: str) -> str:
     return text
 
 
+# def load_text_from_file(path: str) -> str:
+#     with open(path, "r", encoding="utf-8") as f:
+#         return f.read()
 def load_text_from_file(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+        raw = f.read()
 
+    # Normalize line endings to \n
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Strip whitespace from each line, preserving blank lines as paragraph separators
+    lines = [line.strip() for line in raw.splitlines()]
+
+    # Re-join with literal newlines and collapse long runs of blank lines to two newlines
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # Trim leading/trailing whitespace/newlines
+    return text.strip()
 
 def chunk_text(text: str, target_chars: int = 1200, overlap: int = 150) -> List[str]:
     paras = [p.strip() for p in text.split("\n\n") if p.strip()]

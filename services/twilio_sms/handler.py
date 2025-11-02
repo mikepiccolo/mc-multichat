@@ -42,6 +42,9 @@ def get_secret(arn: str) -> str:
 def ddb():
     return boto3.client("dynamodb")
 
+def lambda_client():
+    return boto3.client("lambda")
+
 def tbl_clients(): return os.environ["DDB_CLIENTS"]
 def tbl_routes():  return os.environ["DDB_PHONE_ROUTES"]
 def tbl_convos():  return os.environ["DDB_CONVERSATIONS"]
@@ -155,10 +158,13 @@ def consent_exists(client_id: str, from_e164: str) -> bool:
     return resp.get("Count", 0) > 0
 
 def put_inbound_message(form: dict, from_e164: str, to_e164: str, client_id: str):
-    logger.debug("Storing inbound message for client %s and user %s", client_id, from_e164)
-    pk = f"CLIENT#{client_id}#USER#{from_e164}"
-    sk = f"MSG#{form.get('MessageSid','')}"
+    logger.debug("put_inbout_message: begin ")
+    pk = f"CLIENT#{client_id}#USER#{form.get('From','')}"
     ts = now_iso()
+    sid = form.get("MessageSid", "")
+    # New: time-sortable SK so we can query recent turns quickly
+    sk = f"TS#{ts}#IN#{sid or 'NA'}"
+    logger.debug("put_inbound_message: adding message to conversations for client %s, from %s, to %s, sid %s",client_id, from_e164, to_e164, sid)
     item = {
         "pk": {"S": pk},
         "sk": {"S": sk},
@@ -167,13 +173,12 @@ def put_inbound_message(form: dict, from_e164: str, to_e164: str, client_id: str
         "type": {"S": "inbound_msg"},
         "from": {"S": from_e164},
         "to": {"S": to_e164},
-        "body": {"S": form.get("Body","")},
+        "body": {"S": (form.get("Body") or "")[:1200]},
         "num_media": {"N": form.get("NumMedia","0") or "0"},
         "service_sid": {"S": form.get("MessagingServiceSid","")},
-        "sid": {"S": form.get("MessageSid","")},
+        "sid": {"S": sid},
         "ts": {"S": ts}
     }
-    # Idempotent insert (ignore if already exists)
     try:
         ddb().put_item(
             TableName=tbl_convos(),
@@ -183,6 +188,71 @@ def put_inbound_message(form: dict, from_e164: str, to_e164: str, client_id: str
         return True
     except ddb().exceptions.ConditionalCheckFailedException:
         return False
+
+# def put_inbound_message(form: dict, from_e164: str, to_e164: str, client_id: str):
+#     logger.debug("Storing inbound message for client %s and user %s", client_id, from_e164)
+#     pk = f"CLIENT#{client_id}#USER#{from_e164}"
+#     sk = f"MSG#{form.get('MessageSid','')}"
+#     ts = now_iso()
+#     item = {
+#         "pk": {"S": pk},
+#         "sk": {"S": sk},
+#         "gsi1pk": {"S": f"CLIENT#{client_id}"},
+#         "gsi1sk": {"S": f"TS#{ts}"},
+#         "type": {"S": "inbound_msg"},
+#         "from": {"S": from_e164},
+#         "to": {"S": to_e164},
+#         "body": {"S": form.get("Body","")},
+#         "num_media": {"N": form.get("NumMedia","0") or "0"},
+#         "service_sid": {"S": form.get("MessagingServiceSid","")},
+#         "sid": {"S": form.get("MessageSid","")},
+#         "ts": {"S": ts}
+#     }
+#     # Idempotent insert (ignore if already exists)
+#     try:
+#         ddb().put_item(
+#             TableName=tbl_convos(),
+#             Item=item,
+#             ConditionExpression="attribute_not_exists(pk) AND attribute_not_exists(sk)"
+#         )
+#         return True
+#     except ddb().exceptions.ConditionalCheckFailedException:
+#         return False
+
+def put_outbound_message(client_id: str, from_e164: str, to_e164: str, body: str, sid: str):
+    pk = f"CLIENT#{client_id}#USER#{to_e164}"
+    ts = now_iso()
+    sk = f"TS#{ts}#OUT#{sid or 'NA'}"
+    item = {
+        "pk": {"S": pk},
+        "sk": {"S": sk},
+        "gsi1pk": {"S": f"CLIENT#{client_id}"},
+        "gsi1sk": {"S": f"TS#{ts}"},
+        "type": {"S": "outbound_msg"},
+        "from": {"S": from_e164},
+        "to": {"S": to_e164},
+        "body": {"S": body[:1200]},
+        "sid": {"S": sid or ""},
+        "ts": {"S": ts}
+    }
+    ddb().put_item(TableName=tbl_convos(), Item=item)
+
+# def put_outbound_message(client_id: str, from_e164: str, to_e164: str, body: str, sid: str):
+#     pk = f"CLIENT#{client_id}#USER#{to_e164}"
+#     ts = now_iso()
+#     item = {
+#         "pk": {"S": pk},
+#         "sk": {"S": f"OUT#{sid or ts}"},
+#         "gsi1pk": {"S": f"CLIENT#{client_id}"},
+#         "gsi1sk": {"S": f"TS#{ts}"},
+#         "type": {"S": "outbound_msg"},
+#         "from": {"S": from_e164},
+#         "to": {"S": to_e164},
+#         "body": {"S": body[:1200]},
+#         "sid": {"S": sid or ""},
+#         "ts": {"S": ts}
+#     }
+#     ddb().put_item(TableName=tbl_convos(), Item=item)
 
 def update_message_status(form: dict):
     logger.debug("Updating message status for MessageSid: %s", form.get("MessageSid"))
@@ -214,6 +284,56 @@ def send_reply_via_twilio(msid: str, to_e164: str, body: str):
     )
     r.raise_for_status()
     return r.json()
+
+def orchestrate_reply(client_id: str, from_e164: str, to_e164: str, text: str, message_sid: str | None) -> str:
+    logger.debug("orchestrate_reply: begin with client: %s, from: %s, to: %s, text: %s, message_sid: %s", 
+                 client_id, from_e164, to_e164,text,message_sid)
+    
+    fn = os.environ.get("ORCHESTRATOR_FN")
+    if not fn:
+        return ""
+    payload = {
+        "client_id": client_id,
+        "channel": "sms",
+        "user_e164": from_e164,
+        "text": text,
+        "message_sid": message_sid  # let orchestrator avoid echoing current inbound twice
+    }
+    try:
+        resp = lambda_client().invoke(
+            FunctionName=fn, InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8")
+        )
+        data = json.loads(resp.get("Payload").read().decode("utf-8"))
+        body = data.get("body")
+        if isinstance(body, str):
+            body = json.loads(body)
+        return (body or {}).get("reply", "") if isinstance(body, dict) else (data.get("reply", "") or "")
+    except Exception:
+        return ""
+
+# def orchestrate_reply(client_id: str, from_e164: str, to_e164: str, text: str) -> str:
+#     fn = os.environ.get("ORCHESTRATOR_FN")
+#     if not fn:
+#         return ""
+#     payload = {
+#         "client_id": client_id,
+#         "channel": "sms",
+#         "user_e164": from_e164,
+#         "text": text
+#     }
+#     try:
+#         resp = lambda_client().invoke(
+#             FunctionName=fn, InvocationType="RequestResponse",
+#             Payload=json.dumps(payload).encode("utf-8")
+#         )
+#         data = json.loads(resp.get("Payload").read().decode("utf-8"))
+#         body = data.get("body")
+#         if isinstance(body, str):
+#             body = json.loads(body)
+#         return (body or {}).get("reply", "") if isinstance(body, dict) else (data.get("reply", "") or "")
+#     except Exception:
+#         return ""
 
 # ---------- Handlers ----------
 def handle_inbound(event):
@@ -261,10 +381,13 @@ def handle_inbound(event):
     allowed = client.get("a2p_approved", False) and consent_exists(client["client_id"], from_e164)
 
     if allowed and client.get("messaging_service_sid"):
-        # Minimal MVP reply (bot placeholder). Replace with KB-driven reply later.
-        reply = f"{client['brand']}: Thanks for your message. A specialist will follow up shortly."
+        # Ask orchestrator for a channel-aware reply
+        logger.info("Generating orchestrated reply for client %s and user %s", client["client_id"], from_e164)
+        reply_text = orchestrate_reply(client["client_id"], from_e164, to_e164, body_text, form.get("MessageSid")) or \
+                     f"{client['brand']}: Thanks for your message. A specialist will follow up shortly."
         try:
-            send_reply_via_twilio(client["messaging_service_sid"], from_e164, reply)
+            sent = send_reply_via_twilio(client["messaging_service_sid"], from_e164, reply_text)
+            put_outbound_message(client["client_id"], to_e164, from_e164, reply_text, sent.get("sid", ""))
         except Exception:
             # swallow errors; webhook must return 200 to Twilio
             pass

@@ -108,3 +108,21 @@ variable "default_consent_message" {
   type        = string
   default     = "By pressing 1, you agree to receive text messages from us. Message frequency varies. Message and data rates may apply. For terms and privacy policy, visit our website. Reply STOP to opt out at any time."
 }
+
+variable "model_name" {
+  description = "The AI model name to use for chat completions"
+  type        = string
+  default     = "gpt-4o-mini"
+}
+
+variable "max_tool_loops" {
+  description = "Maximum number of tool use loops in chat orchestrator"
+  type        = number
+  default     = 2
+}
+
+variable "max_history_turns" {
+  description = "Maximum number of conversation history items for chat orchestrator memory"
+  type        = string
+  default     = "10"
+}

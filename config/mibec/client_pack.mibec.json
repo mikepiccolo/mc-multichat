@@ -3,15 +3,7 @@
   "display_name": { "S": "mibec.ai" },
   "vertical": { "S": "isv" },
   "timezone": { "S": "America/New_York" },
-  "business_hours": {
-    "M": {
-      "mon": { "L": [ { "L": [ { "S": "09:00" }, { "S": "17:00" } ] } ] },
-      "tue": { "L": [ { "L": [ { "S": "09:00" }, { "S": "17:00" } ] } ] },
-      "wed": { "L": [ { "L": [ { "S": "09:00" }, { "S": "17:00" } ] } ] },
-      "thu": { "L": [ { "L": [ { "S": "09:00" }, { "S": "17:00" } ] } ] },
-      "fri": { "L": [ { "L": [ { "S": "09:00" }, { "S": "17:00" } ] } ] }
-    }
-  },
+  "business_hours": { "S": "09:00-17:00 Mon-Fri, closed Sat-Sun" },
   "escalation_email": { "S": "mpiccolo623@gmail.com" },
   "escalation_phone_e164": { "S": "+12014106922" },
   "twilio_number_e164": { "S": "{{twilio_number_e164}}" },
@@ -20,7 +12,7 @@
       {
         "M": {
           "type": { "S": "url" },
-          "value": { "S": "https://electric-soybean-4b3.notion.site/MIBEC-AI-Frequently-Asked-Questions-FAQ-28b7159aa21480ed9477f617f3d05a92" }
+          "value": { "S": "https://electric-soybean-4b3.notion.site/mibec-ai-frequently-asked-questions" }
         }
       }
     ]

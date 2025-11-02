@@ -34,7 +34,7 @@ resource "aws_lambda_function" "twilio_sms" {
   runtime          = "python3.13"
   architectures    = ["arm64"]
   source_code_hash = data.archive_file.twilio_sms_zip.output_base64sha256
-  timeout          = 15
+  timeout          = 30
 
   environment {
     variables = {
@@ -44,6 +44,7 @@ resource "aws_lambda_function" "twilio_sms" {
       DDB_CONVERSATIONS = aws_dynamodb_table.conversations.name
       TWILIO_SID_ARN    = aws_secretsmanager_secret.twilio_account_sid.arn
       TWILIO_TOKEN_ARN  = local.twilio_auth_token_arn
+      ORCHESTRATOR_FN   = aws_lambda_function.chat_orchestrator.function_name
     }
   }
 

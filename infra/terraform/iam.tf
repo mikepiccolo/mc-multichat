@@ -51,8 +51,14 @@ resource "aws_iam_role_policy" "lambda_policy" {
           local.twilio_auth_token_arn,
           aws_secretsmanager_secret.twilio_account_sid.arn,
           aws_secretsmanager_secret.studio_bearer.arn,
-          aws_secretsmanager_secret.rds_credentials.arn
+          aws_secretsmanager_secret.rds_credentials.arn,
+          aws_secretsmanager_secret.apigw_api_key.arn 
         ]
+      },
+      {
+        Effect = "Allow",
+        Action = ["lambda:InvokeFunction"],               # <-- allow inter-lambda calls (chat_orchestrator)
+        Resource = "*"                                   # tighten later with specific ARNs after stabilization
       }
     ]
   })
