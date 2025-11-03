@@ -189,36 +189,6 @@ def put_inbound_message(form: dict, from_e164: str, to_e164: str, client_id: str
     except ddb().exceptions.ConditionalCheckFailedException:
         return False
 
-# def put_inbound_message(form: dict, from_e164: str, to_e164: str, client_id: str):
-#     logger.debug("Storing inbound message for client %s and user %s", client_id, from_e164)
-#     pk = f"CLIENT#{client_id}#USER#{from_e164}"
-#     sk = f"MSG#{form.get('MessageSid','')}"
-#     ts = now_iso()
-#     item = {
-#         "pk": {"S": pk},
-#         "sk": {"S": sk},
-#         "gsi1pk": {"S": f"CLIENT#{client_id}"},
-#         "gsi1sk": {"S": f"TS#{ts}"},
-#         "type": {"S": "inbound_msg"},
-#         "from": {"S": from_e164},
-#         "to": {"S": to_e164},
-#         "body": {"S": form.get("Body","")},
-#         "num_media": {"N": form.get("NumMedia","0") or "0"},
-#         "service_sid": {"S": form.get("MessagingServiceSid","")},
-#         "sid": {"S": form.get("MessageSid","")},
-#         "ts": {"S": ts}
-#     }
-#     # Idempotent insert (ignore if already exists)
-#     try:
-#         ddb().put_item(
-#             TableName=tbl_convos(),
-#             Item=item,
-#             ConditionExpression="attribute_not_exists(pk) AND attribute_not_exists(sk)"
-#         )
-#         return True
-#     except ddb().exceptions.ConditionalCheckFailedException:
-#         return False
-
 def put_outbound_message(client_id: str, from_e164: str, to_e164: str, body: str, sid: str):
     pk = f"CLIENT#{client_id}#USER#{to_e164}"
     ts = now_iso()
@@ -236,23 +206,6 @@ def put_outbound_message(client_id: str, from_e164: str, to_e164: str, body: str
         "ts": {"S": ts}
     }
     ddb().put_item(TableName=tbl_convos(), Item=item)
-
-# def put_outbound_message(client_id: str, from_e164: str, to_e164: str, body: str, sid: str):
-#     pk = f"CLIENT#{client_id}#USER#{to_e164}"
-#     ts = now_iso()
-#     item = {
-#         "pk": {"S": pk},
-#         "sk": {"S": f"OUT#{sid or ts}"},
-#         "gsi1pk": {"S": f"CLIENT#{client_id}"},
-#         "gsi1sk": {"S": f"TS#{ts}"},
-#         "type": {"S": "outbound_msg"},
-#         "from": {"S": from_e164},
-#         "to": {"S": to_e164},
-#         "body": {"S": body[:1200]},
-#         "sid": {"S": sid or ""},
-#         "ts": {"S": ts}
-#     }
-#     ddb().put_item(TableName=tbl_convos(), Item=item)
 
 def update_message_status(form: dict):
     logger.debug("Updating message status for MessageSid: %s", form.get("MessageSid"))
@@ -311,29 +264,6 @@ def orchestrate_reply(client_id: str, from_e164: str, to_e164: str, text: str, m
         return (body or {}).get("reply", "") if isinstance(body, dict) else (data.get("reply", "") or "")
     except Exception:
         return ""
-
-# def orchestrate_reply(client_id: str, from_e164: str, to_e164: str, text: str) -> str:
-#     fn = os.environ.get("ORCHESTRATOR_FN")
-#     if not fn:
-#         return ""
-#     payload = {
-#         "client_id": client_id,
-#         "channel": "sms",
-#         "user_e164": from_e164,
-#         "text": text
-#     }
-#     try:
-#         resp = lambda_client().invoke(
-#             FunctionName=fn, InvocationType="RequestResponse",
-#             Payload=json.dumps(payload).encode("utf-8")
-#         )
-#         data = json.loads(resp.get("Payload").read().decode("utf-8"))
-#         body = data.get("body")
-#         if isinstance(body, str):
-#             body = json.loads(body)
-#         return (body or {}).get("reply", "") if isinstance(body, dict) else (data.get("reply", "") or "")
-#     except Exception:
-#         return ""
 
 # ---------- Handlers ----------
 def handle_inbound(event):
