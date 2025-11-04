@@ -33,7 +33,7 @@ resource "aws_lambda_function" "twilio_studio" {
   runtime       = "python3.13"
   architectures = ["arm64"]
   source_code_hash = data.archive_file.twilio_studio_zip.output_base64sha256
-  timeout = 15
+  timeout = 30
   
   environment {
     variables = {
@@ -51,6 +51,9 @@ resource "aws_lambda_function" "twilio_studio" {
       DDB_CONVERSATIONS  = aws_dynamodb_table.conversations.name
       DEFAULT_GREETING_MESSAGE = var.default_greeting_message
       DEFAULT_CONSENT_MESSAGE = var.default_consent_message
+      ORCHESTRATOR_FN    = aws_lambda_function.chat_orchestrator.function_name 
+      AUTO_REPLY_COOLDOWN_MIN = "45"    # optional; we dedupe by CallSid anyway
+
     }
   }
 

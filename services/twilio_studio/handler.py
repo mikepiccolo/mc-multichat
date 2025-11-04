@@ -17,6 +17,11 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
 JSON = {"content-type": "application/json"}
 
+def now_iso():
+    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+def lambda_client(): return boto3.client("lambda")
+
 def convert_to_e164(number: str) -> str:
     logger.info("Converting number to E164 - %s", number)
     number = number.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
@@ -95,7 +100,7 @@ def openai_key() -> str:
     return get_secret(os.environ["OPENAI_SECRET_ARN"])
 
 def transcribe_via_openai(mp3_bytes: bytes) -> str:
-    logger.info("Transcribing voicemail via OpenAI Whisper");
+    logger.debug("Transcribing voicemail via OpenAI Whisper");
     """Use OpenAI Whisper transcription via REST multipart."""
     files = {
         "file": ("voicemail.mp3", io.BytesIO(mp3_bytes), "audio/mpeg"),
@@ -109,6 +114,35 @@ def transcribe_via_openai(mp3_bytes: bytes) -> str:
     )
     r.raise_for_status()
     return r.json().get("text", "")
+
+# ---------- Twilio ----------
+def send_sms_via_ms(msid: str, to_e164: str, body: str) -> dict:
+    logger.debug("Sending SMS via Twilio Messaging Service SID: %s to %s", msid, to_e164)
+    sid = get_secret(os.environ["TWILIO_SID_ARN"])
+    tok = get_secret(os.environ["TWILIO_TOKEN_ARN"])
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+    r = requests.post(url, auth=(sid, tok), data={
+        "To": to_e164,
+        "MessagingServiceSid": msid,
+        "Body": body
+    }, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def fetch_twilio_recording_bytes(recording_url: str) -> bytes:
+    logger.debug("Fetching Twilio recording from URL: %s", recording_url)
+    """
+    recording_url from Studio is like:
+    https://api.twilio.com/2010-04-01/Accounts/ACxxx/Recordings/REyyy
+    We’ll try with '.mp3' first, then raw.
+    """
+    sid = get_secret(os.environ["TWILIO_SID_ARN"])
+    tok = get_secret(os.environ["TWILIO_TOKEN_ARN"])
+    for url in (recording_url + ".mp3", recording_url):
+        resp = requests.get(url, auth=(sid, tok), timeout=30)
+        if resp.ok and resp.content:
+            return resp.content
+    raise RuntimeError("failed to download recording")
 
 def send_sms_via_twilio(from_e164: str, to_e164: str, body: str):
     logger.info("Sending SMS via Twilio from %s to %s", from_e164, to_e164)
@@ -181,24 +215,90 @@ def put_consent(client_id: str, from_e164: str, to_e164: str, call_sid: str, sou
 
 # ---------- Lookup ----------
 def lookup_client_via_ddb(called_e164: str):
-    logger.debug("Looking up client via DDB for called number: %s", called_e164);
+    logger.debug("Looking up client via DDB for called number: %s", called_e164)
     pr_table = os.environ["DDB_PHONE_ROUTES"]
     c_table  = clients_table()
     # 1) phone_routes[called] -> client_id
     pr = ddb().get_item(TableName=pr_table, Key={"phone_e164": {"S": called_e164}})
     if "Item" not in pr:
-        logger.warning("No phone_routes entry for called number: %s", called_e164);
+        logger.warning("No phone_routes entry for called number: %s", called_e164)
         return None
     client_id = pr["Item"]["client_id"]["S"]
     logger.debug("Found client_id: %s", client_id);
     # 2) clients[client_id] -> forward_to
     cr = ddb().get_item(TableName=c_table, Key={"client_id": {"S": client_id}})
     item = cr.get("Item", {})
-    forward_to = item.get("escalation_phone_e164", {}).get("S") or item.get("twilio_number_e164", {}).get("S")
-    greeting_message = item.get("greeting_message", {}).get("S") or os.environ.get("DEFAULT_GREETING_MESSAGE", "Sorry we missed your call.  Please leave a message after the tone.")  
-    consent_message = item.get("consent_message", {}).get("S") or os.environ.get("DEFAULT_CONSENT_MESSAGE", "Press 1 to consent to receive SMS text messages. Message and data rates may apply. Reply STOP to opt out at any time.")  
 
-    return {"client_id": client_id, "forward_to": forward_to, "greeting_message": greeting_message, "consent_message": consent_message}
+    def S(k, d=""): return item.get(k, {}).get("S", d)
+    def B(k, d=False): return item.get(k, {}).get("BOOL", d)
+
+    forward_to =  S("escalation_phone_e164",None) or item.get("twilio_number_e164", {}).get("S")
+    greeting_message = S("greeting_message",None) or os.environ.get("DEFAULT_GREETING_MESSAGE", "Sorry we missed your call.  Please leave a message after the tone.")  
+    consent_message = S("consent_message",None) or os.environ.get("DEFAULT_CONSENT_MESSAGE", "Press 1 to consent to receive SMS text messages. Message and data rates may apply. Reply STOP to opt out at any time.")  
+    messaging_service_sid = S("messaging_service_sid","")
+    a2p_approved = B("a2p_approved", False)
+    
+    return {"client_id": client_id, 
+            "display_name": S("display_name",""),
+            "forward_to": forward_to, 
+            "greeting_message": greeting_message, 
+            "consent_message": consent_message,
+            "messaging_service_sid": messaging_service_sid,
+            "a2p_approved": a2p_approved
+            }
+
+# ---------- persist helpers ----------
+def put_event_missed_call(client_id: str, from_e164: str, to_e164: str, call_sid: str, transcript: str | None, forwarded_from: str | None) -> bool:
+    logger.debug("Putting missed call event for CallSid: %s", call_sid)
+    """
+    Writes a single immutable event row keyed by CallSid.
+    Returns True if created (not duplicate), False if already existed (dedupe).
+    """
+    pk = f"CLIENT#{client_id}#USER#{from_e164}"
+    ts = now_iso()
+    sk = f"EVENT#MISSED#{call_sid}"
+    item = {
+        "pk": {"S": pk},
+        "sk": {"S": sk},
+        "gsi1pk": {"S": f"CLIENT#{client_id}"},
+        "gsi1sk": {"S": f"TS#{ts}"},
+        "type": {"S": "event_missed_call"},
+        "from": {"S": from_e164},
+        "to": {"S": to_e164},
+        "call_sid": {"S": call_sid},
+        "forwarded_from": {"S": forwarded_from or ""},
+        "transcript": {"S": (transcript or "")[:4000]},
+        "ts": {"S": ts}
+    }
+    try:
+        ddb().put_item(
+            TableName=conversations_table(),
+            Item=item,
+            ConditionExpression="attribute_not_exists(pk) AND attribute_not_exists(sk)"
+        )
+        return True
+    except ddb().exceptions.ConditionalCheckFailedException:
+        return False
+
+def put_outbound_message(client_id: str, from_e164: str, to_e164: str, body: str, sid: str | None):
+    logger.debug("Logging outbound message to conversations table for audit")
+    pk = f"CLIENT#{client_id}#USER#{to_e164}"
+    ts = now_iso()
+    sk = f"TS#{ts}#OUT#{sid or 'NA'}"
+    item = {
+        "pk": {"S": pk},
+        "sk": {"S": sk},
+        "gsi1pk": {"S": f"CLIENT#{client_id}"},
+        "gsi1sk": {"S": f"TS#{ts}"},
+        "type": {"S": "outbound_msg"},
+        "from": {"S": from_e164},
+        "to": {"S": to_e164},
+        "body": {"S": body[:1200]},
+        "sid": {"S": sid or ""},
+        "ts": {"S": ts}
+    }
+    ddb().put_item(TableName=conversations_table(), Item=item)
+
 
 # Helper to get last 10 digits of a phone number 
 def _last10(e164_or_any: str | None) -> str | None:
@@ -211,6 +311,34 @@ def _last10(e164_or_any: str | None) -> str | None:
     logger.debug("Last 10 digits: %s", last10);
     return last10
 
+# ---------- Orchestrator invocation ----------
+def invoke_orchestrator(client_id: str, from_e164: str, text: str, call_sid: str, transcript: str | None) -> str:
+    logger.debug("Invoking orchestrator for client_id=%s, from=%s, call_sid=%s", client_id, from_e164, call_sid);
+    fn = os.environ.get("ORCHESTRATOR_FN")
+    if not fn:
+        return ""
+    payload = {
+        "client_id": client_id,
+        "channel": "sms",
+        "user_e164": from_e164,
+        "text": text or "",                  # may be empty; orchestrator will use transcript
+        "event": "missed_call",
+        "transcript": transcript or "",
+        "call_sid": call_sid
+    }
+    try:
+        resp = lambda_client().invoke(
+            FunctionName=fn, InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8")
+        )
+        data = json.loads(resp.get("Payload").read().decode("utf-8"))
+        body = data.get("body")
+        if isinstance(body, str):
+            body = json.loads(body)
+        return (body or {}).get("reply", "") if isinstance(body, dict) else (data.get("reply", "") or "")
+    except Exception:
+        return ""
+    
 # ---------- Route handlers ----------
 def handle_lookup(event):
     logger.debug("Handling lookup event: %s", json.dumps(event));
@@ -338,6 +466,8 @@ def handle_voicemail(event):
     caller  = body.get("from") or body.get("From")
     called  = body.get("to") or body.get("To")
     client_id = body.get("client_id")
+    call_sid  = body.get("call_sid")
+    fwd       = body.get("forwarded_from")
 
     if not rec_url:
         logger.debug("No recording_url in body, calling handle_no_voicemail: %s", json.dumps(body))
@@ -346,66 +476,71 @@ def handle_voicemail(event):
     if not caller or not called or not client_id:
         return bad(400, "from, to, client_id required")
 
+    if not call_sid:
+        return bad(400, "call_sid required")
+    
     try:
         caller = convert_to_e164(caller)
         called = convert_to_e164(called)
     except Exception as e:
         return bad(400, f"phone number invalid: {e}")
     
-    # if not called.strip().startswith("+"):
-    #     logger.debug("Prepending + to called number: %s", called);
-    #     called = "+" + called.strip()
-
-   # Download MP3 (Twilio requires basic auth)
-    sid = get_secret(os.environ["TWILIO_SID_ARN"])
-    tok = get_secret(os.environ["TWILIO_TOKEN_ARN"])
-    audio = requests.get(rec_url + ".mp3", auth=(sid, tok), timeout=60)
-    audio.raise_for_status()
-
+     # (1) Transcribe (best-effort)
     transcript = ""
     try:
-        transcript = transcribe_via_openai(audio.content)
+        audio = fetch_twilio_recording_bytes(rec_url)
+        transcript = transcribe_via_openai(audio) or ""
     except Exception as e:
-        transcript = f"[transcription_error: {e}]"
+        logger.error("Transcription error: %s", e)
+        transcript = ""
 
     if len(transcript) == 0:
         logger.info("Transcription empty, calling handle_no_voicemail")
         return handle_no_voicemail(event)
     
     # Notify client (owner) by SMS
-    # From = the Twilio number (called), To = client's escalation phone
-    # ddbc = boto3.client("dynamodb")
-    # c_table = os.environ.get("DDB_CLIENTS","")
-    # client_row = ddbc.get_item(TableName=c_table, Key={"client_id": {"S": client_id}}).get("Item", {})
-    # notify_to = client_row.get("escalation_phone_e164", {}).get("S") or client_row.get("twilio_number_e164", {}).get("S")
     msg = f"Missed call voicemail from {caller}:\n{transcript[:800]}"
+    client = lookup_client_via_ddb(called)
+ 
+    logger.debug("handle_voicemail: Client record details - %s", json.dumps(client))
 
-    ddbc = boto3.resource("dynamodb")
-    pr_table = os.environ.get("DDB_PHONE_ROUTES", "")
-    table = ddbc.Table(pr_table)
-    resp = table.query(
-        KeyConditionExpression=Key("phone_e164").eq(called),
-    )
-
-    logger.debug("DynamoDB query response: %s", json.dumps(resp))
-
-    items = resp.get("Items", []) 
-    if not items:
-        return bad(404, "Unknown number")
-    item = items[0]
-    notify_to = item["escalation_phone_e164"] #or item.get("twilio_number_e164", {}).get("S")
-
-    send_sms_via_twilio(from_e164=called, to_e164=notify_to, body=msg)
-
-    # (Optional) Notify caller with a quick acknowledgment
-    ack = "Thanks for your voicemail. We’ll get back to you shortly."
     try:
-        if consent_exists(client_id, caller):
-            send_sms_via_twilio(from_e164=called, to_e164=caller, body=ack)
-    except Exception:
+        send_sms_via_ms(client.get("messaging_service_sid",""), to_e164=client.get("forward_to",""), body=msg)
+    except Exception as e:
+        logger.error("Failed to send SMS to escalation number via Messaging Service SID: %s", e)
         pass
+        
+    # (2) Create dedupe event (one per CallSid)
+    created = put_event_missed_call(client_id, caller, called, call_sid, transcript, fwd)
+    if not created:
+        # already processed this CallSid
+        return {"statusCode": 200, "headers": JSON, "body": json.dumps({"ok": True, "deduped": True})}
 
-    return ok({"ok": True, "transcribed": bool(transcript), "length_bytes": len(audio.content)})
+    # (3) Decide if we can text the caller
+    may_text = client["a2p_approved"] and consent_exists(client_id, caller) and bool(client["messaging_service_sid"])
+
+    reply_text = ""
+    if may_text:
+        # Let the orchestrator generate a first outreach message, grounded by transcript
+        reply_text = invoke_orchestrator(client_id, caller, "", call_sid, transcript)
+        if not reply_text:
+            # Fallback template
+            brand = client["display_name"]
+            if transcript:
+                reply_text = f"{brand}: Got your voicemail—thanks for the details. I can help next steps. What’s the best time to text/call back? Reply STOP to opt out."
+            else:
+                reply_text = f"{brand}: Sorry we missed your call. How can we help? Reply STOP to opt out."
+        try:
+            sent = send_sms_via_ms(client["messaging_service_sid"], caller, reply_text)
+            put_outbound_message(client_id, called, caller, reply_text, sent.get("sid"))
+        except Exception as e:
+            # swallow; we still wrote the event
+            logger.error(f"Failed to send outbound SMS to caller, {e}")
+            pass
+    else:
+        logger.info("Not sending SMS to caller %s: may_text=%s", caller, may_text)
+
+    return {"statusCode": 200, "headers": JSON, "body": json.dumps({"ok": True, "texted": bool(reply_text)})}
 
 def handle_no_voicemail(event):
     logger.debug("Handling no-voicemail event: %s", json.dumps(event))
@@ -415,64 +550,68 @@ def handle_no_voicemail(event):
         body = json.loads(event.get("body") or "{}")
     except Exception:
         return bad(400, "Invalid JSON")
+    
     caller = body.get("from") or body.get("From")
     called = body.get("to") or body.get("To")
     client_id = body.get("client_id")
-    if not caller or not called or not client_id:
-        return bad(400, "from, to, client_id required")
+    call_sid  = body.get("call_sid")
+    fwd       = body.get("forwarded_from")
+
+    if not caller or not called or not client_id and not call_sid:
+        return {"statusCode": 400, "headers": JSON, "body": json.dumps({"ok": False, "error": "missing fields"})}
 
     try:
-        caller = convert_to_e164(caller);
-        called = convert_to_e164(called);
+        caller = convert_to_e164(caller)
+        called = convert_to_e164(called)
     except Exception as e:
         return bad(400, f"phone number invalid: {e}")
     
-    # if not called.strip().startswith("+"):
-    #     logger.debug("Prepending + to called number: %s", called);
-    #     called = "+" + called.strip()
+    # (1) Create dedupe event (one per CallSid)
+    created = put_event_missed_call(client_id, caller, called, call_sid, None, fwd)
+    if not created:
+        return {"statusCode": 200, "headers": JSON, "body": json.dumps({"ok": True, "deduped": True})}
 
+    # (2) If allowed, send a generic auto-reply
+    client = lookup_client_via_ddb(called)
+    may_text = client["a2p_approved"] and consent_exists(client_id, caller) and bool(client["messaging_service_sid"])
 
-    # Default missed-call SMS to caller (starts chatbot in a later step)
-    try:
-        if consent_exists(client_id, caller):
-            send_sms_via_twilio(from_e164=called, to_e164=caller,
-                        body="Sorry we missed your call. How can we help?")
-    except Exception:
-        pass
+    reply_text = ""
+    if may_text:
+        reply_text = invoke_orchestrator(client_id, caller, "", call_sid, None)
+        if not reply_text:
+            brand = client["display_name"]
+            reply_text = f"{brand}: Sorry we missed your call. How can we help? Reply STOP to opt out."
+        try:
+            sent = send_sms_via_ms(client["messaging_service_sid"], caller, reply_text)
+            
+            put_outbound_message(client_id, called, caller, reply_text, sent.get("sid"))
+            
+            send_sms_via_ms(client["messaging_service_sid"], to_e164=client.get("forward_to",""), 
+                            body=f"Missed call from {caller}. No voicemail left.")
+        except Exception as e:
+            logger.error(f"Failed to send outbound SMS to caller, {e}")
+            pass
+    else:
+        logger.info("Not sending SMS to caller %s: may_text=%s", caller, may_text)
 
-    # Notify client
-    # ddbc = boto3.client("dynamodb")
-    # c_table = os.environ.get("DDB_CLIENTS","")
-    # client_row = ddbc.get_item(TableName=c_table, Key={"client_id": {"S": client_id}}).get("Item", {})
-    # notify_to = client_row.get("escalation_phone_e164", {}).get("S") or client_row.get("twilio_number_e164", {}).get("S")
-    ddbc = boto3.resource("dynamodb")
-    pr_table = os.environ.get("DDB_PHONE_ROUTES", "")
-    table = ddbc.Table(pr_table)
-    resp = table.query(
-        KeyConditionExpression=Key("phone_e164").eq(called),
-    )
-
-    logger.debug("DynamoDB query response: %s", json.dumps(resp))
-
-    items = resp.get("Items", []) 
-    if not items:
-        return bad(404, "Unknown number")
-    item = items[0]
-    notify_to = item["escalation_phone_e164"] #or item.get("twilio_number_e164", {}).get("S")
-
- 
-    send_sms_via_twilio(from_e164=called, to_e164=notify_to,
-                        body=f"Missed call from {caller}. No voicemail left.")
-
-    return ok({"ok": True, "notified": True})
+    return {"statusCode": 200, "headers": JSON, "body": json.dumps({"ok": True, "texted": bool(reply_text)})}    
 
 def lambda_handler(event, context):
     path = (event.get("requestContext", {}).get("resourcePath") or event.get("rawPath") or "").lower()
     method = (event.get("httpMethod") or "").upper()
     # Resource paths configured in Terraform:
     logger.info("Received request: %s %s", method, path)
-    if path.endswith("/twilio/studio/lookup") and method == "GET": return handle_lookup(event)
-    if path.endswith("/twilio/studio/consent") and method == "POST": return handle_consent(event)
-    if path.endswith("/twilio/studio/voicemail") and method == "POST": return handle_voicemail(event)
-    if path.endswith("/twilio/studio/no-voicemail") and method == "POST": return handle_no_voicemail(event)
+    try:
+        if path.endswith("/twilio/studio/lookup") and method == "GET": 
+            return handle_lookup(event)
+        if path.endswith("/twilio/studio/consent") and method == "POST": 
+            return handle_consent(event)
+        if path.endswith("/twilio/studio/voicemail") and method == "POST": 
+            return handle_voicemail(event)
+        if path.endswith("/twilio/studio/no-voicemail") and method == "POST": 
+            return handle_no_voicemail(event)
+    except Exception as e:
+        logger.error("Unhandled exception: %s", e)
+        return bad(500, f"Unhandled exception in lambda_handler: {e}")
+    
     return bad(404, "Handler not found")

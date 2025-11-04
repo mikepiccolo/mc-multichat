@@ -166,13 +166,13 @@ def add_opt_out_notice(reply: str, channel: str, max_len: int) -> str:
     return reply
 
 # ------------ Orchestrator ------------
-def orchestrate(client_id: str, channel: str, user_e164: str, text: str, message_sid: str) -> dict:
+def orchestrate(client_id: str, channel: str, user_e164: str, text: str, message_sid: str | None, event: str | None = None, transcript: str | None = None) -> dict:
     logger.debug("Orchestrating chat for client %s, channel %s, user %s", client_id, channel, user_e164)
     client = get_client(client_id)
     logger.debug("Client config: %s", json.dumps(client))
 
     persona = client["bot_persona"] or f"You are {client['display_name']}'s helpful assistant. Be brief and friendly."
-    logger.debug("Using bot persona: %s", persona);
+    logger.debug("Using bot persona: %s", persona)
 
     max_reply_len = client["max_reply_len"] if channel == "sms" else max(600, client["max_reply_len"])
     logger.debug("Max reply length set to %d for channel %s", max_reply_len, channel)
@@ -180,8 +180,23 @@ def orchestrate(client_id: str, channel: str, user_e164: str, text: str, message
     history_max_turns = int(os.environ.get("MAX_HISTORY_TURNS", "10"))
     logger.debug("Conversation history max turns is %s", history_max_turns)
 
+    # If this is a missed-call kickoff, bias the system prompt accordingly
+    missed_prelude = ""
+    if (event or "").lower() == "missed_call":
+        logger.debug("Adding missed call prelude to system prompt")
+        missed_prelude = (
+            "The user just called and we missed them. "
+            "If a transcript is provided, use it to personalize your first text. "
+            "Start friendly, acknowledge the call, and offer one clear next step. "
+            "Keep very concise for SMS. Do not include links unless asked.\n"
+        )
+        if transcript:
+            logger.debug("Adding voicemail transcript to missed call prelude")
+            missed_prelude += f"Voicemail transcript (may be partial/noisy): {transcript}\n"
+
     system = (
         f"{persona}\n"
+        f"{missed_prelude}"
         f"- When unsure, ask a brief clarifying question.\n"
         f"- For SMS, keep replies as informative as possible but concise; avoid long lists.\n"
         f"- If user asks a general question, use the knowledge base tool.\n"
@@ -195,9 +210,16 @@ def orchestrate(client_id: str, channel: str, user_e164: str, text: str, message
     msgs = [{"role": "system", "content": system}]
     msgs.extend(past_msgs)
 
-    # Append current user text unless we already saw the same inbound sid in history
-    if not saw_current and text:
+    # For missed_call kickoff, the user didn't send a text yet; seed a virtual user cue
+    if (event or "").lower() == "missed_call" and not text:
+        logger.debug("Seeding missed call user message into chat history")
+        seed = "We missed your call."
+        msgs.append({"role": "user", "content": seed})
+    elif not saw_current and text:
+        logger.debug("Adding current user message to chat history")
+        # Add the current user message if not already in history
         msgs.append({"role": "user", "content": text})
+
 
     functions = [
         {
@@ -221,11 +243,6 @@ def orchestrate(client_id: str, channel: str, user_e164: str, text: str, message
             },"required":["summary"]}
         }
     ]
-
-    # msgs = [
-    #     {"role":"system","content":system},
-    #     {"role":"user","content":text}
-    # ]
 
     logger.debug("Initial messages: %s", json.dumps(msgs))
 
@@ -296,10 +313,12 @@ def lambda_handler(event, context):
     user_e164 = body.get("user_e164") or body.get("from")
     text      = (body.get("text") or "").strip()
     message_sid = body.get("message_sid")
+    event_name  = body.get("event")
+    transcript  = body.get("transcript")
     
-    if not client_id or not user_e164 or not text:
-        logger.error("Missing required parameters: client_id=%s, user_e164=%s, text=%s", client_id, user_e164, text)
+    if not client_id or not user_e164:
+        logger.error("Missing required parameters: client_id=%s, user_e164=%s", client_id, user_e164)
         return {"statusCode": 400, "headers": JSON, "body": json.dumps({"ok": False, "error": "client_id, user_e164, text required"})}
 
-    result = orchestrate(client_id, channel, user_e164, text, message_sid)
+    result = orchestrate(client_id, channel, user_e164, text, message_sid, event=event_name, transcript=transcript)
     return {"statusCode": 200, "headers": JSON, "body": json.dumps(result)}

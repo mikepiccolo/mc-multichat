@@ -321,6 +321,10 @@ def handle_inbound(event):
         except Exception:
             # swallow errors; webhook must return 200 to Twilio
             pass
+    else:
+        logger.warning("handle_inbound:Failed consent check. Not sending reply to %s with messaging_service_id: %s.  A2P not approved, or consent does not exist for sender",
+                    from_e164,
+                    client.get("messaging_service_sid") or "MISSING")
 
     return {"statusCode": 200, "headers": JSON, "body": json.dumps({"ok": True})}
 
