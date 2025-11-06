@@ -20,3 +20,5 @@ model_name = "gpt-4o-mini"
 max_tool_loops = 2
 # conversation history
 max_history_turns = "10"
+# opt-in keyword for SMS consent
+optin_keyword = "hello"

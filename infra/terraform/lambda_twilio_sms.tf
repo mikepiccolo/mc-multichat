@@ -45,6 +45,7 @@ resource "aws_lambda_function" "twilio_sms" {
       TWILIO_SID_ARN    = aws_secretsmanager_secret.twilio_account_sid.arn
       TWILIO_TOKEN_ARN  = local.twilio_auth_token_arn
       ORCHESTRATOR_FN   = aws_lambda_function.chat_orchestrator.function_name
+      OPTIN_KEYWORD     = var.optin_keyword
     }
   }
 

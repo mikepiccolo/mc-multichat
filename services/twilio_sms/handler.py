@@ -10,6 +10,8 @@ import hashlib
 import hmac
 import base64
 import urllib.parse
+import re
+
 
 JSON = {"content-type": "application/json"}
 FORM = "application/x-www-form-urlencoded"
@@ -19,6 +21,43 @@ import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
+def _optin_keyword() -> str:
+    logger.debug("_optin_keyword: Retrieving opt-in keyword")
+    return (os.environ.get("OPTIN_KEYWORD") or "hello").strip().lower()
+
+def is_optin_hello(body: str) -> bool:
+    logger.debug("is_optin_hello: Checking if body matches opt-in keyword")
+    kw = re.escape(_optin_keyword())
+    # match e.g. "hello", " Hello! ", "hello." (no extra text)
+    return bool(re.match(rf"^\s*{kw}\s*[!\.\?]*\s*$", (body or "").lower()))
+
+def record_consent_sms_keyword(client_id: str, from_e164: str, to_e164: str, keyword: str = "hello") -> bool:
+    logger.debug("record_consent_sms_keyword: Recording consent for client %s and user %s", client_id, from_e164)
+    pk = f"CLIENT#{client_id}#USER#{from_e164}"
+    ts = now_iso()
+    sk = f"CONSENT#TS#{ts}#sms-keyword"
+    item = {
+        "pk": {"S": pk},
+        "sk": {"S": sk},
+        "gsi1pk": {"S": f"CLIENT#{client_id}"},
+        "gsi1sk": {"S": f"TS#{ts}"},
+        "type": {"S": "consent"},
+        "source": {"S": "sms-keyword"},
+        "keyword": {"S": keyword},
+        "to": {"S": to_e164},
+        "ts": {"S": ts}
+    }
+    try:
+        ddb().put_item(
+            TableName=tbl_convos(),
+            Item=item,
+            ConditionExpression="attribute_not_exists(pk) AND attribute_not_exists(sk)"
+        )
+        return True
+    except ddb().exceptions.ConditionalCheckFailedException:
+        logger.info("record_consent_sms_keyword: Consent already exists for client %s and user %s", client_id, from_e164)
+        return False
+    
 def convert_to_e164(number: str) -> str:
     logger.debug("Converting number to E164 - %s", number)
     number = number.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
@@ -292,6 +331,32 @@ def handle_inbound(event):
     # Persist inbound (idempotent by MessageSid)
     put_inbound_message(form, from_e164, to_e164, client["client_id"])
 
+    # --- SMS opt-in via keyword ("hello") ---
+    if is_optin_hello(body_text):
+        logger.debug("Inbound opt-in keyword detected from %s for client %s", from_e164, client["client_id"])
+        # If already consented, treat like normal inbound (fall through)
+        already = consent_exists(client["client_id"], from_e164) if client else False
+        if not already and client:
+            logger.debug("Recording new consent for %s for client %s", from_e164, client["client_id"])
+            record_consent_sms_keyword(client["client_id"], from_e164, to_e164, _optin_keyword())
+
+            # Acknowledge opt-in only if we can legally/textually reply
+            if client.get("a2p_approved", False) and client.get("messaging_service_sid"):
+                ack = f"{client['brand']}: Thanks for opting in to texts. How can we help you today?\n\nReply STOP to opt out. Msg&Data rates may apply."
+                try:
+                    sent = send_reply_via_twilio(client["messaging_service_sid"], from_e164, ack)
+                    put_outbound_message(client["client_id"], to_e164, from_e164, ack, sent.get("sid"))
+                    return {"statusCode": 200, "headers": JSON, "body": json.dumps({"ok": True, "ack": True})}
+                except Exception:
+                    logger.error("Failed to send opt-in acknowledgment to %s for client %s", from_e164, client["client_id"])
+                    # fall through; at least we stored the consent
+                    pass
+            # If not approved or no MS SID, just end after storing consent
+            return {"statusCode": 200, "headers": JSON, "body": json.dumps({"ok": True, "ack": False})}
+        else:
+            logger.debug("Consent already exists for %s for client %s", from_e164, client["client_id"])
+            # fall through to normal inbound processing
+   
     # Respect STOP/HELP (belt + suspenders; Twilio Advanced Opt-Out should be enabled on MS)
     if body_text.upper() in {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"}:
         # no reply here; Twilio will handle with its default if Advanced Opt-Out is enabled

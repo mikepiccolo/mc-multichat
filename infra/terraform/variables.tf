@@ -126,3 +126,9 @@ variable "max_history_turns" {
   type        = string
   default     = "10"
 }
+
+variable "optin_keyword" {
+  description = "Keyword users can text to opt in to messaging"
+  type        = string
+  default     = "hello"
+}
