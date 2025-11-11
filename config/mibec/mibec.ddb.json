@@ -1,0 +1,83 @@
+{
+    "client_id": {
+        "S": "mibec"
+    },
+    "a2p_approved": {
+        "BOOL": true
+    },
+    "bot_enabled": {
+        "BOOL": true
+    },
+    "bot_persona": {
+        "S": "You are a friendly and concise assistant for mibec.ai, an independent software vendor. You help customers understand services, next steps, and booking options. Keep SMS replies short and human."
+    },
+    "business_hours": {
+        "S": "09:00-17:00 Mon-Fri, closed Sat-Sun"
+    },
+    "chat": {
+        "M": {
+            "opt_out_text": {
+                "S": "Reply STOP to opt out."
+            },
+            "tone": {
+                "S": "friendly, concise"
+            }
+        }
+    },
+    "consent_message": {
+        "S": "If you would like to chat with our ae eye assistant and learn more about how this service can benefit you, press 1 now. By pressing 1, you agree to receive text messages from my beck ae eye. Message frequency varies. Message and data rates may apply. For terms and privacy policy, visit my beck dot ae eye / terms and my beck dot ae eye / privacy. Reply STOP to opt out at any time."
+    },
+    "display_name": {
+        "S": "mibec.ai"
+    },
+    "escalation_email": {
+        "S": "mpiccolo623@gmail.com"
+    },
+    "escalation_phone_e164": {
+        "S": "+12014106922"
+    },
+    "greeting_message": {
+        "S": "Thank you for calling my beck ae eye. We're sorry we missed your call. Please leave a message after the tone and we'll return your call shortly."
+    },
+    "kb_sources": {
+        "L": [
+            {
+                "M": {
+                    "type": {
+                        "S": "url"
+                    },
+                    "value": {
+                        "S": "https://electric-soybean-4b3.notion.site/MIBEC-AI-Frequently-Asked-Questions-FAQ-28b7159aa21480ed9477f617f3d05a92"
+                    }
+                }
+            }
+        ]
+    },
+    "lead_agent_enabled": {
+        "BOOL": true
+    },
+    "lead_notify_sms_e164": {
+        "S": "+12014106922"
+    },
+    "lead_required_fields": {
+        "S": ""
+    },
+    "lead_vertical": {
+        "S": "isv"
+    },
+    "max_reply_len": {
+        "N": "1200"
+    },
+    "messaging_service_sid": {
+        "S": "MGd61190ba023d8e52906599eac1478bce"
+    },
+    "timezone": {
+        "S": "America/New_York"
+    },
+    "twilio_number_e164": {
+        "S": "+18623583354"
+    },
+    "vertical": {
+        "S": "isv"
+    }
+}

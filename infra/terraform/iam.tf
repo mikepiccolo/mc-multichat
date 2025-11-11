@@ -35,7 +35,8 @@ resource "aws_iam_role_policy" "lambda_policy" {
         "Effect": "Allow",
         "Action": [
           "dynamodb:PutItem","dynamodb:GetItem","dynamodb:UpdateItem",
-          "dynamodb:Query","dynamodb:Scan","dynamodb:BatchWriteItem"
+          "dynamodb:Query","dynamodb:Scan","dynamodb:BatchWriteItem",
+          "dynamodb:DeleteItem"
         ],
         "Resource": [
           aws_dynamodb_table.clients.arn,

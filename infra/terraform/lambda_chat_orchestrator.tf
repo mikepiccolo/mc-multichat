@@ -47,6 +47,15 @@ resource "aws_lambda_function" "chat_orchestrator" {
       MODEL_NAME           = var.model_name
       MAX_TOOL_LOOPS       = var.max_tool_loops
       MAX_HISTORY_TURNS    = var.max_history_turns
+
+      # --- Lead agent (preview) ---
+      LEAD_MAX_QUESTIONS        = "3"     # max additional questions to ask
+      LEAD_DEDUPE_MINUTES       = "120"   # dedupe window for repeated leads from same user
+      LEAD_NOTIFY_CLIENT_SMS    = "true" # set "true" to allow SMS notify to client (uses Twilio creds)
+
+      # --- Client notifications (now only SMS; more later) ---
+      TWILIO_SID_ARN          = aws_secretsmanager_secret.twilio_account_sid.arn
+      TWILIO_TOKEN_ARN        = local.twilio_auth_token_arn
     }
   }
 
