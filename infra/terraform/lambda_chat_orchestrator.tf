@@ -53,6 +53,14 @@ resource "aws_lambda_function" "chat_orchestrator" {
       LEAD_DEDUPE_MINUTES       = "120"   # dedupe window for repeated leads from same user
       LEAD_NOTIFY_CLIENT_SMS    = "true" # set "true" to allow SMS notify to client (uses Twilio creds)
 
+      # --- Scheduling defaults ---
+      SCHED_DAYS_AHEAD       = "7"
+      SCHED_SLOT_MINUTES     = "30"
+      SCHED_BUFFER_MINUTES   = "5"
+      SCHED_HOLD_MINUTES     = "15"
+      # choose scheduling source (owner | business_hours)
+      SCHED_SOURCE           = "owner"
+
       # --- Client notifications (now only SMS; more later) ---
       TWILIO_SID_ARN          = aws_secretsmanager_secret.twilio_account_sid.arn
       TWILIO_TOKEN_ARN        = local.twilio_auth_token_arn

@@ -182,7 +182,15 @@ def lookup_client_by_to(to_e164: str) -> dict | None:
     msid  = c.get("messaging_service_sid", {}).get("S")
     a2p   = c.get("a2p_approved", {}).get("BOOL", False)
     brand = c.get("display_name", {}).get("S", client_id)
-    return {"client_id": client_id, "messaging_service_sid": msid, "a2p_approved": a2p, "brand": brand}
+    escalation_phone_e164 = c.get("escalation_phone_e164", {}).get("S")
+    owner_numbers = c.get("owner_numbers", {}).get("S", "")
+
+    return {"client_id": client_id, 
+            "messaging_service_sid": msid, 
+            "a2p_approved": a2p, 
+            "escalation_phone_e164": escalation_phone_e164,
+            "owner_numbers": owner_numbers,
+            "brand": brand}
 
 def consent_exists(client_id: str, from_e164: str) -> bool:
     logger.debug("Checking consent for client %s and user %s", client_id, from_e164)
@@ -304,6 +312,45 @@ def orchestrate_reply(client_id: str, from_e164: str, to_e164: str, text: str, m
     except Exception:
         return ""
 
+# --- Owner SMS / admin functions orchestration ---
+def is_owner_sms(client: dict, from_e164: str) -> bool:
+    logger.debug("is_owner_sms: Checking if SMS is from owner number: %s", from_e164)
+    if not client: 
+        return False
+    owner = (client.get("escalation_phone_e164") or "").strip()
+    if owner and owner == from_e164:
+        logger.debug("is_owner_sms: Match found with escalation_phone_e164")
+        return True
+    # Optional: support comma-sep list in client["owner_numbers"]
+    logger.debug("is_owner_sms: Checking owner_numbers list")
+    owners = (client.get("owner_numbers") or "").split(",")
+    is_owners = from_e164 in [o.strip() for o in owners if o.strip()]
+    logger.debug("is_owner_sms: owner_numbers match: %s", is_owners)
+    return  is_owners
+
+def invoke_orchestrator_owner(client_id: str, from_e164: str, body_text: str) -> dict:
+    logger.debug("invoke_orchestrator_owner: Invoking orchestrator in owner mode for client %s and user %s", client_id, from_e164)
+    payload = {
+        "client_id": client_id,
+        "channel": "sms_owner",     # signals owner mode
+        "role": "owner",
+        "user_e164": from_e164,
+        "text": body_text or "",
+        "message_sid": None
+    }
+    # if you already have direct Lambda invoke:
+    import boto3, json, os
+    lf = boto3.client("lambda")
+    fn = os.environ["ORCHESTRATOR_FN"]
+    resp = lf.invoke(FunctionName=fn, InvocationType="RequestResponse",
+                     Payload=json.dumps(payload).encode("utf-8"))
+    out = json.loads(resp["Payload"].read().decode("utf-8") or "{}")
+    try:
+        return json.loads(out.get("body") or "{}")
+    except Exception as e:
+        logger.error("Failed to invoke orchestrator in owner mode: %s", e)
+        return out or {}
+
 # ---------- Handlers ----------
 def handle_inbound(event):
     logger.debug("Handling inbound SMS event")
@@ -330,6 +377,25 @@ def handle_inbound(event):
 
     # Persist inbound (idempotent by MessageSid)
     put_inbound_message(form, from_e164, to_e164, client["client_id"])
+
+    # --- Handle owner sms, skip save inbound message ---
+    if is_owner_sms(client, from_e164):
+        logger.info("Inbound SMS from owner %s for client %s", from_e164, client["client_id"])
+        # Owner/admin path: bypass consent/STOP logic; respond via Twilio back to owner.
+        result = invoke_orchestrator_owner(client["client_id"], from_e164, body_text)
+        reply = (result.get("reply") or "OK").strip()
+        logger.debug("Orchestrator returned reply for owner %s: %s", from_e164, reply)
+        # send SMS back to owner using Messaging Service
+        if client.get("messaging_service_sid"):
+            try:
+                sent = send_reply_via_twilio(client["messaging_service_sid"], from_e164, reply)
+                logger.debug("Sent owner reply SMS to %s via Twilio, SID: %s", from_e164, sent.get("sid"))
+                put_outbound_message(client["client_id"], to_e164, from_e164, reply, sent.get("sid"))
+            except Exception as e:
+                logger.error("Failed to send owner reply SMS to %s: %s", from_e164, e)
+                pass
+
+        return {"statusCode": 200, "headers": JSON, "body": json.dumps({"ok": True, "owner": True})}
 
     # --- SMS opt-in via keyword ("hello") ---
     if is_optin_hello(body_text):
