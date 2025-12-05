@@ -680,9 +680,181 @@ def next_slots_from_availability(client: dict, days_ahead: int, slot_minutes: in
             cur += dt.timedelta(minutes=slot_minutes)
     return options
 
+def next_slots_with_filters(
+    client: dict,
+    days_ahead: int,
+    slot_minutes: int,
+    buffer_minutes: int,
+    *,
+    # filters (all optional, LOCAL TZ)
+    local_date: str | None = None,
+    weekday: str | None = None,
+    part_of_day: str | None = None,
+    start_local_time: str | None = None,
+    end_local_time: str | None = None,
+    days_offset_start: int | None = None,
+    days_offset_end: int | None = None,
+    next_week: bool = False,
+    cursor_iso: str | None = None,
+    count: int = 3
+) -> tuple[list[dict], str | None]:
+    logger.debug("next_slots_with_filters: Finding next slots for client %s with filters", client["client_id"])
+    """From availability windows, find next N slots of slot_minutes length, applying buffer_minutes to immediate next slots.
+    Apply various local-time filters as specified.
+    Return (options, next_cursor)."""
+    tz = _tz(client.get("timezone") or "America/New_York")
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    windows, taken_starts = list_slot_blocks(client, days_ahead)
+
+    # Build local filter window
+    nl = dt.datetime.now(dt.timezone.utc).astimezone(tz)
+    start_local = nl
+    end_local = nl + dt.timedelta(days=days_ahead)
+
+    if local_date:
+        logger.debug("next_slots_with_filters: Applying local_date filter: %s", local_date)
+        d = dt.date.fromisoformat(local_date)
+        start_local = dt.datetime(d.year, d.month, d.day, 0, 0, tzinfo=tz)
+        end_local   = start_local + dt.timedelta(days=1)
+    elif weekday:
+        # next occurrence of the weekday (including today if matches and still future)
+        logger.debug("next_slots_with_filters: Applying weekday filter: %s", weekday)
+        target = _weekday_to_int(weekday)
+        delta = (target - nl.weekday()) % 7
+        start_local = dt.datetime(nl.year, nl.month, nl.day, tzinfo=tz) + dt.timedelta(days=delta)
+        end_local   = start_local + dt.timedelta(days=1)
+    elif next_week:
+        # next Mon..Sun week window
+        logger.debug("next_slots_with_filters: Applying next_week filter")
+        delta = (7 - nl.weekday()) % 7  # days to next Monday (or 0 if Monday -> next week)
+        start_local = (dt.datetime(nl.year, nl.month, nl.day, tzinfo=tz)
+                       + dt.timedelta(days=delta or 7))
+        end_local   = start_local + dt.timedelta(days=7)
+    elif days_offset_start is not None or days_offset_end is not None:
+        logger.debug("next_slots_with_filters: Applying days_offset filter: start=%s, end=%s", days_offset_start, days_offset_end)
+        s = days_offset_start or 0
+        e = days_offset_end if days_offset_end is not None else s
+        start_local = dt.datetime(nl.year, nl.month, nl.day, tzinfo=tz) + dt.timedelta(days=s)
+        end_local   = dt.datetime(nl.year, nl.month, nl.day, tzinfo=tz) + dt.timedelta(days=e+1)
+
+    logger.debug("next_slots_with_filters: Local filter window from %s to %s", start_local.isoformat(), end_local.isoformat())
+    # time-of-day narrowing
+    h_start, h_end = 0, 24
+    if part_of_day:
+        logger.debug("next_slots_with_filters: Applying part_of_day filter: %s", part_of_day)
+        h_start, h_end = _part_of_day_range(part_of_day)
+    if start_local_time and end_local_time:
+        logger.debug("next_slots_with_filters: Applying start_local_time/end_local_time filter: %s - %s", start_local_time, end_local_time)
+        hs, ms = map(int, start_local_time.split(":"))
+        he, me = map(int, end_local_time.split(":"))
+        h_start, h_end = hs, he
+        # we’ll filter by clock inside the loop; minutes are respected
+
+    # cursor (UTC ISO) — advance start after a specific slot
+    start_after_utc = None
+    if cursor_iso:
+        try:
+            logger.debug("next_slots_with_filters: Applying cursor filter: %s", cursor_iso)
+            start_after_utc = dt.datetime.fromisoformat(cursor_iso.replace("Z","+00:00"))
+        except Exception as e:
+            logger.warning("next_slots_with_filters: Invalid cursor_iso %s: %s", cursor_iso, e)
+            start_after_utc = None
+
+    # Enumerate from availability windows
+    options=[]
+    next_cursor=None
+    for s_iso, e_iso in windows:
+        logger.debug("next_slots_with_filters: Checking window: %s - %s", s_iso, e_iso)
+        sdt = dt.datetime.fromisoformat(s_iso.replace("Z","+00:00"))
+        edt = dt.datetime.fromisoformat(e_iso.replace("Z","+00:00"))
+        cur = max(sdt, now_utc + dt.timedelta(minutes=buffer_minutes))
+
+        while cur + dt.timedelta(minutes=slot_minutes) <= edt:
+            logger.debug("next_slots_with_filters: Considering slot starting at %s", cur.isoformat())
+            if start_after_utc and cur <= start_after_utc:
+                cur += dt.timedelta(minutes=slot_minutes); continue
+
+            # local filters
+            cur_local = cur.astimezone(tz)
+            if not (start_local <= cur_local < end_local):
+                cur += dt.timedelta(minutes=slot_minutes); continue
+            if not (h_start <= cur_local.hour < h_end):
+                cur += dt.timedelta(minutes=slot_minutes); continue
+            if start_local_time and end_local_time:
+                hs, ms = map(int, start_local_time.split(":"))
+                he, me = map(int, end_local_time.split(":"))
+                tmin = cur_local.hour*60 + cur_local.minute
+                if not (hs*60+ms <= tmin < he*60+me):
+                    cur += dt.timedelta(minutes=slot_minutes); continue
+
+            slot_start_iso = cur.replace(microsecond=0,tzinfo=dt.timezone.utc).isoformat().replace("+00:00","Z")
+            logger.debug("next_slots_with_filters: Slot start ISO after time of day check: %s", slot_start_iso)
+            if slot_start_iso not in taken_starts:
+                logger.debug("next_slots_with_filters: Found available slot: %s", slot_start_iso)
+                end = cur + dt.timedelta(minutes=slot_minutes)
+                label = _fmt_slot_local(cur, end, tz)
+                options.append({
+                    "start_iso": slot_start_iso,
+                    "end_iso": end.replace(tzinfo=dt.timezone.utc).isoformat().replace("+00:00","Z"),
+                    "label_local": label
+                })
+                if len(options) >= count:
+                    next_cursor = slot_start_iso
+                    return options, next_cursor
+            else:
+                logger.debug("next_slots_with_filters: Slot %s is taken; skipping", slot_start_iso)
+
+            cur += dt.timedelta(minutes=slot_minutes)
+
+    logger.debug("next_slots_with_filters: Found %d slots total", len(options))
+    return options, next_cursor
+
 def _fmt_slot_local(start_utc: dt.datetime, end_utc: dt.datetime, tz: ZoneInfo) -> str:
     s = start_utc.astimezone(tz); e = end_utc.astimezone(tz); abbr=s.tzname()
     return f"{s.strftime('%a %b %-d')}, {s.strftime('%-I:%M')}–{e.strftime('%-I:%M %p')} {abbr}"
+
+def _rs_key(client_id: str, user_e164: str):
+    return {"pk":{"S":f"CLIENT#{client_id}#USER#{user_e164}"},
+            "sk":{"S":"SCHEDSTATE#RS"}}
+
+def _set_reschedule_state(client_id: str, user_e164: str, appt: dict | None):
+    item = {**_rs_key(client_id, user_e164),
+            "type":{"S":"sched_reschedule"},
+            "updated":{"S": now_iso()}}
+    if appt:
+        item["appointment_id"] = {"S": appt["appointment_id"]}
+        item["old_slot_iso"]   = {"S": appt.get("slot_start","")}
+    ddb().put_item(TableName=tbl_convos(), Item=item)
+
+def _get_reschedule_state(client_id: str, user_e164: str) -> dict:
+    logger.debug("_get_reschedule_state: Retrieving reschedule state for client %s and user %s", client_id, user_e164)
+    r = ddb().get_item(TableName=tbl_convos(), Key=_rs_key(client_id, user_e164))
+    it = r.get("Item", {})
+    return {"appointment_id": _S(it,"appointment_id",""), "old_slot_iso": _S(it,"old_slot_iso","")}
+
+def _clear_reschedule_state(client_id: str, user_e164: str):
+    logger.debug("_clear_reschedule_state: Clearing reschedule state for client %s and user %s", client_id, user_e164)
+    try: ddb().delete_item(TableName=tbl_convos(), Key=_rs_key(client_id, user_e164))
+    except Exception: pass
+
+def _cancel_appt_by_id(client: dict, user_e164: str, appointment_id: str) -> dict:
+    logger.debug("_cancel_appt_by_id: Canceling appointment %s for client %s and user %s", appointment_id, client["client_id"], user_e164)
+    """Cancel appointment by ID for the user."""
+    appts = _list_user_appointments(client["client_id"], user_e164)
+    target = next((a for a in appts if a["appointment_id"] == appointment_id), None)
+    if not target:
+        return {"ok": False, "error":"no_matching_appointment"}
+    # delete SLOT marker
+    slot_iso = target.get("slot_start","")
+    if slot_iso:
+        try: ddb().delete_item(TableName=tbl_convos(), Key=slot_marker_key(client["client_id"], slot_iso))
+        except Exception: pass
+    # delete APPT item
+    try: ddb().delete_item(TableName=tbl_convos(), Key={"pk":target["pk"], "sk":target["sk"]})
+    except Exception: pass
+    try: notify_appt_cancel_client_sms(client, user_e164, slot_iso, target["appointment_id"])
+    except Exception: pass
+    return {"ok": True, "canceled_appointment_id": target["appointment_id"], "slot_start": slot_iso}
 
 # ------------- Holds / confirm using markers -------------
 def write_slot_hold(client_id: str, slot_iso: str, hold_minutes: int) -> bool:
@@ -712,38 +884,67 @@ def confirm_slot_marker(client_id: str, slot_iso: str):
         logger.error("confirm_slot_marker: Error confirming slot %s for client %s: %s", slot_iso, client_id, e) 
         pass
 
+def _render_slot_list(slots: list[dict], tz: ZoneInfo) -> str:
+    lines=[]
+    for i, s in enumerate(slots, start=1):
+        lines.append(f"{i}) {s['label_local']}")
+    return "Here are some available times:\n" + "\n".join(lines)
+
 # ------------- Scheduling tool agent -------------
-def schedule_propose(client: dict, user_e164: str, days_ahead: int | None = None) -> dict:
-    logger.debug("schedule_propose: Proposing slots for client %s and user %s", client["client_id"], user_e164)
-    """Generate proposed slots based on availability or business hours."""
-    days = int(client.get("sched_days_ahead", os.environ.get("SCHED_DAYS_AHEAD","7"))) if days_ahead is None else days_ahead
+def schedule_propose(client: dict, user_e164: str, args: dict | None = None) -> dict:
+    logger.debug("schedule_propose: Proposing schedule slots for client %s and user %s", client["client_id"], user_e164)
+    """Generate and store proposed slots for the user based on client settings."""
+    days = int(client.get("sched_days_ahead", os.environ.get("SCHED_DAYS_AHEAD","7"))) 
     slot_m = int(client.get("sched_slot_minutes", os.environ.get("SCHED_SLOT_MINUTES","30")))
     buf_m = int(client.get("sched_buffer_minutes", os.environ.get("SCHED_BUFFER_MINUTES","5")))
+    tz = _tz(client.get("timezone") or "America/New_York")
+
+    args = args or {}
+
     # If SCHED_SOURCE=owner, require availability; else fall back to business hours (not shown here)
     source = (client.get("sched_source", os.environ.get("SCHED_SOURCE","owner")) or "owner").lower()
     if source == "owner":
-        options = next_slots_from_availability(client, days, slot_m, buf_m, count=3)
-        if not options:
-            # no availability -> encourage lead capture path
-            return {"ok": True, "slots": [], "empty": True, "message": "No available times on file."}
-        # store lightweight sched state with proposals for the user (optional)
-        #st = {"proposed": options, "held_slot_iso": "", "updated": now_iso()}
+        slots, cursor = next_slots_with_filters(
+            client, days, slot_m, buf_m,
+            local_date=args.get("local_date"),
+            weekday=args.get("weekday"),
+            part_of_day=args.get("part_of_day"),
+            start_local_time=args.get("start_local_time"),
+            end_local_time=args.get("end_local_time"),
+            days_offset_start=args.get("days_offset_start"),
+            days_offset_end=args.get("days_offset_end"),
+            next_week=bool(args.get("next_week")),
+            cursor_iso=args.get("cursor_iso"),
+            count=3
+        )
 
-        # attach indexes 1..N
-        indexed = [{"index": i+1, **opt} for i, opt in enumerate(options)]
+        if not slots:
+            logger.info("schedule_propose: No matching availability found for client %s and user %s", client["client_id"], user_e164)
+            return {"ok": False, "error": "No matching availability."}
 
+        indexed = [{"index": i+1, **s} for i, s in enumerate(slots)]
+        # persist proposals, filters, and cursor
+        logger.debug("schedule_propose: Storing proposed slots for client %s and user %s", client["client_id"], user_e164)
         ddb().put_item(TableName=tbl_convos(), Item={
             "pk":{"S":f"CLIENT#{client['client_id']}#USER#{user_e164}"},
             "sk":{"S":"SCHEDSTATE#ACTIVE"},
             "type":{"S":"sched_state"},
             "proposed_json":{"S": json.dumps(indexed)},
+            "propose_filters":{"S": json.dumps(args)},
+            "cursor_iso":{"S": cursor or ""},
             "held_slot_iso":{"S":""},
             "updated":{"S": now_iso()}
         })
-        return {"ok": True, "slots": options}
+        return {
+            "ok": True,
+            "slots": indexed,
+            "cursor_iso": cursor or "",
+            "rendered_list": _render_slot_list(indexed, tz)
+        }
     else:
+        logger.info("schedule_propose: SCHED_SOURCE is not 'owner'; no availability source implemented in this path")
         # (legacy business_hours generator, omitted to keep this patch focused)
-        return {"ok": True, "slots": []}
+        return {"ok": True, "slots": [], "empty": True, "message": "No matching availability."}
 
 def _load_sched_state(client_id: str, user_e164: str) -> dict:
     r = ddb().get_item(TableName=tbl_convos(),
@@ -754,6 +955,24 @@ def _load_sched_state(client_id: str, user_e164: str) -> dict:
         return {"proposed": json.loads(_S(it,"proposed_json","[]")), "held": _S(it,"held_slot_iso","")}
     except Exception:
         return {"proposed": [], "held": ""}
+
+def schedule_more(client: dict, user_e164: str) -> dict:
+    logger.debug("schedule_more: Generating more schedule proposals for client %s and user %s", client["client_id"], user_e164)
+    """Generate more proposed slots based on existing filters."""
+    r = ddb().get_item(TableName=tbl_convos(),
+        Key={"pk":{"S":f"CLIENT#{client['client_id']}#USER#{user_e164}"},
+             "sk":{"S":"SCHEDSTATE#ACTIVE"}})
+    it = r.get("Item", {})
+    filters = {}
+    cursor = _S(it, "cursor_iso", "")
+    try:
+        filters = json.loads(_S(it, "propose_filters", "{}"))
+    except Exception as e:
+        logger.error("Failed to load propose_filters: %s", e)
+        pass
+    if cursor:
+        filters["cursor_iso"] = cursor
+    return schedule_propose(client, user_e164, filters)
 
 def _autocorrect_iso_from_proposals(bad_iso: str, proposals: List[dict]) -> str | None:
     """Fixes bad-year cases by matching month/day/time to a current proposal."""
@@ -808,6 +1027,18 @@ def _next_upcoming_appt(appts: List[dict]) -> dict | None:
         if sdt >= now_utc and (best_dt is None or sdt < best_dt):
             best, best_dt = a, sdt
     return best
+
+def _part_of_day_range(pod: str) -> tuple[int,int]:
+    # local hour ranges
+    return {
+        "morning": (8, 12),
+        "afternoon": (12, 17),
+        "evening": (17, 21),
+        "night": (21, 24)
+    }.get(pod, (0, 24))
+
+def _weekday_to_int(code: str) -> int:
+    return {"MON":0,"TUE":1,"WED":2,"THU":3,"FRI":4,"SAT":5,"SUN":6}[code]
 
 def schedule_hold(client: dict, user_e164: str, slot_iso: str, 
                   service_type: str | None = None, notes: str | None = None,
@@ -892,10 +1123,117 @@ def schedule_confirm(client: dict, user_e164: str) -> dict:
     except Exception as e:
         logger.error("schedule_confirm: Error confirming held slot %s for client %s: %s", slot_iso, client["client_id"], e) 
         pass
+
+    # Gather details for notification
+    svc = _S(it,"service_type","")
+    nts = _S(it,"notes","")
+    uname = _S(it,"user_name","")
+
+    if not (svc or nts):
+        logger.debug("schedule_confirm: No service_type or notes provided; synthesizing from recent messages for client %s and user %s", client["client_id"], user_e164)
+        # passive 1-line summary from recent messages
+        hist, _ = fetch_recent_messages(client["client_id"], user_e164, limit=6)
+        # simple heuristic: join last 2 user messages
+        user_utts = [m["content"] for m in hist if m["role"] == "user"][-2:]
+        synth = " / ".join(t[:120] for t in user_utts if t).strip()
+        nts = synth or nts
+
+    # write onto the appointment record so it's stored with the appt
+    logger.debug("schedule_confirm: Writing service_type and notes onto appointment %s for client %s and user %s", appt_id, client["client_id"], user_e164)
+    ddb().update_item(
+        TableName=tbl_convos(),
+        Key={"pk":{"S":f"CLIENT#{client['client_id']}#USER#{user_e164}"},
+            "sk":{"S":f"TS#{ts}#APPT#{appt_id}"}},
+        UpdateExpression="SET #st = :st, #n = :n, #un = :un",
+        ExpressionAttributeNames={"#st":"service_type","#n":"notes","#un":"user_name"},
+        ExpressionAttributeValues={":st":{"S": svc[:64]}, ":n":{"S": nts[:300]}, ":un":{"S": uname[:80]}}
+    )
+
     # notify client internally
-    notify_appt_client_sms(client, user_e164, slot_iso, appt_id,
-                           _S(it,"service_type",""), _S(it,"notes",""))
-    return {"ok": True, "appointment_id": appt_id, "slot_start": slot_iso}
+    notify_appt_client_sms(
+        client, user_e164, slot_iso, appt_id,
+        _S(it,"service_type",""), _S(it,"notes",""), _S(it,"user_name","")
+    )   
+
+    # --- NEW: reschedule tail ---
+    logger.debug("schedule_confirm: Checking for reschedule state for client %s and user %s", client["client_id"], user_e164)
+    rs = _get_reschedule_state(client["client_id"], user_e164)
+    rescheduled_from = None
+    if rs.get("appointment_id"):
+        logger.debug("schedule_confirm: Found reschedule state; canceling old appointment %s for client %s and user %s", rs["appointment_id"], client["client_id"], user_e164)
+        res = _cancel_appt_by_id(client, user_e164, rs["appointment_id"])
+        if res.get("ok"):
+            rescheduled_from = {"appointment_id": res["canceled_appointment_id"], "slot_start": res.get("slot_start","")}
+        _clear_reschedule_state(client["client_id"], user_e164)
+
+    return {"ok": True, "appointment_id": appt_id, "slot_start": slot_iso,
+            "rescheduled_from": rescheduled_from}    
+
+def schedule_set_details(client: dict, user_e164: str, service_type: str | None = None,
+                         notes: str | None = None, user_name: str | None = None) -> dict:
+    logger.debug("schedule_set_details: Setting details for client %s and user %s", client["client_id"], user_e164)
+    """Set service_type, notes, user_name on either active sched state or most recent confirmed appointment."""
+    # 1) Try active sched state
+    key = {"pk":{"S":f"CLIENT#{client['client_id']}#USER#{user_e164}"},
+           "sk":{"S":"SCHEDSTATE#ACTIVE"}}
+    r = ddb().get_item(TableName=tbl_convos(), Key=key)
+    it = r.get("Item", {})
+    if it:
+        expr = []
+        names = {}
+        vals = {}
+        if service_type:
+            expr.append("#st = :st")
+            names["#st"] = "service_type"
+            vals[":st"] = {"S": service_type[:64]}
+        if notes:
+            expr.append("#n = :n")
+            names["#n"] = "notes"
+            vals[":n"] = {"S": notes[:300]}
+        if user_name:
+            expr.append("#un = :un")
+            names["#un"] = "user_name"
+            vals[":un"] = {"S": user_name[:80]}
+        if expr:
+            ddb().update_item(TableName=tbl_convos(), Key=key,
+                              UpdateExpression="SET " + ", ".join(expr),
+                              ExpressionAttributeNames=names,
+                              ExpressionAttributeValues=vals)
+        return {"ok": True, "updated": bool(expr), "scope":"hold"}
+
+    # 2) Else update most recent confirmed appt within 15 minutes
+    appts = _list_user_appointments(client["client_id"], user_e164)
+    appts = list(reversed(appts))  # newest first
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    for a in appts:
+        try:
+            sdt = dt.datetime.fromisoformat(a["slot_start"].replace("Z","+00:00"))
+        except Exception:
+            continue
+        # limit updates to recent confirmations (avoid editing old appts)
+        if (now_utc - dt.datetime.fromisoformat(a["ts"].replace("Z","+00:00"))) <= dt.timedelta(minutes=15):
+            expr = []
+            names = {}
+            vals = {}
+            if service_type:
+                expr.append("#st = :st")
+                names["#st"] = "service_type"
+                vals[":st"] = {"S": service_type[:64]}
+            if notes:
+                expr.append("#n = :n")
+                names["#n"] = "notes"
+                vals[":n"] = {"S": notes[:300]}
+            if user_name:
+                expr.append("#un = :un")
+                names["#un"] = "user_name"
+                vals[":un"] = {"S": user_name[:80]}
+            if expr:
+                ddb().update_item(TableName=tbl_convos(), Key={"pk":a["pk"], "sk":a["sk"]},
+                                  UpdateExpression="SET " + ", ".join(expr),
+                                  ExpressionAttributeNames=names,
+                                  ExpressionAttributeValues=vals)
+                return {"ok": True, "updated": True, "scope":"appointment", "appointment_id": a["appointment_id"]}
+    return {"ok": True, "updated": False, "scope":"none"}
 
 def schedule_cancel_hold(client: dict, user_e164: str) -> dict:
     logger.debug("schedule_cancel: Canceling held slot for client %s and user %s", client["client_id"], user_e164)
@@ -951,7 +1289,7 @@ def schedule_cancel_appointment(client: dict, user_e164: str, appointment_id: st
         try:
             logger.debug("schedule_cancel_appointment: Deleting slot marker for client %s and user %s at slot %s", client["client_id"], user_e164, slot_iso)
             ddb().delete_item(TableName=tbl_convos(), Key=slot_marker_key(client["client_id"], slot_iso))
-        except Exception:
+        except Exception as e:
             logger.error("schedule_cancel_appointment: Error deleting slot marker for client %s and user %s: %s", client["client_id"], user_e164, e)
             pass
 
@@ -959,7 +1297,7 @@ def schedule_cancel_appointment(client: dict, user_e164: str, appointment_id: st
     try:
         logger.debug("schedule_cancel_appointment: Deleting appointment record for client %s and user %s, appointment_id=%s", client["client_id"], user_e164, target["appointment_id"])
         ddb().delete_item(TableName=tbl_convos(), Key={"pk": target["pk"], "sk": target["sk"]})
-    except Exception:
+    except Exception as e:
         logger.error("schedule_cancel_appointment: Error deleting appointment for client %s and user %s: %s", client["client_id"], user_e164, e)
         pass
 
@@ -967,24 +1305,44 @@ def schedule_cancel_appointment(client: dict, user_e164: str, appointment_id: st
     try:
         logger.debug("schedule_cancel_appointment: Notifying client %s about canceled appointment %s", client["client_id"], target["appointment_id"])
         notify_appt_cancel_client_sms(client, user_e164, slot_iso, target["appointment_id"])
-    except Exception:
+    except Exception as e:
         logger.error("schedule_cancel_appointment: Error notifying client %s about canceled appointment %s: %s", client["client_id"], target["appointment_id"], e)
         pass
 
     return {"ok": True, "canceled_appointment_id": target["appointment_id"], "slot_start": slot_iso}
 
-def notify_appt_client_sms(client: dict, user_e164: str, slot_iso: str, appt_id: str, service_type: str, notes: str):
-    logger.debug("notify_appt_client_sms: Notifying client %s about appointment %s via SMS", client["client_id"], appt_id)
-    """Send SMS to client about confirmed/canceling appointment."""
+def schedule_reschedule_request(client: dict, user_e164: str, appointment_id: str | None = None) -> dict:
+    logger.debug("schedule_reschedule_request: Requesting reschedule for client %s and user %s, appointment_id=%s", client["client_id"], user_e164, appointment_id)
+    """Mark which appointment we're rescheduling (or none if there isn't one). Do NOT cancel yet."""
+    appts = _list_user_appointments(client["client_id"], user_e164)
+    target = None
+    if appointment_id:
+        target = next((a for a in appts if a["appointment_id"] == appointment_id), None)
+    else:
+        target = _next_upcoming_appt(appts)
+    _set_reschedule_state(client["client_id"], user_e164, target)
+    return {"ok": True, "has_target": bool(target),
+            "appointment_id": target["appointment_id"] if target else "",
+            "slot_start": target.get("slot_start","") if target else ""}
+
+def notify_appt_client_sms(client: dict, user_e164: str, slot_iso: str, appt_id: str,
+                           service_type: str, notes: str, user_name: str = ""):
+    logger.debug("notify_appt_client_sms: Notifying client %s about appointment %s with user %s", client["client_id"], appt_id, user_e164)
+    """Send SMS notification to client about new appointment."""
     msid = client.get("messaging_service_sid") or ""
     to_e164 = client.get("lead_notify_sms_e164") or client.get("escalation_phone_e164") or ""
     if not (msid and to_e164): return
     tz = _tz(client.get("timezone") or "America/New_York")
-    s = dt.datetime.fromisoformat(slot_iso.replace("Z","+00:00")).astimezone(tz) if slot_iso else None
-    msg = f"{client.get('display_name')}: Appt {appt_id} with {user_e164} at {s.strftime('%a %b %-d, %-I:%M %p %Z')}" if s else f"{client.get('display_name')}: Appt {appt_id} with {user_e164}"
-    if service_type: msg += f"; type: {service_type}"
-    if notes: msg += f"; notes: {notes[:80]}"
-    if len(msg)>300: msg = msg[:297]+"…"
+    s = dt.datetime.fromisoformat(slot_iso.replace("Z","+00:00")).astimezone(tz)
+    when = s.strftime('%a %b %-d, %-I:%M %p %Z')
+
+    who = f"{user_name}, {user_e164}" if user_name else f"{user_e164}"
+    topic = f" • {service_type}" if service_type else ""
+    note = f" • {notes[:120]}" if notes else ""
+    msg = f"{client.get('display_name')}: Appt {appt_id} with {who} @ {when}{topic}{note}"
+
+    if len(msg) > 300: msg = msg[:297] + "…"
+
     try: _twilio_send_sms(msid, to_e164, msg)
     except Exception as e:
         logger.error("notify_appt_client_sms: Error sending SMS to %s: %s", to_e164, e)
@@ -1220,6 +1578,7 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
     user_now_anchor = (
         f"NOW_UTC: {now_utc.replace(microsecond=0).isoformat().replace('+00:00','Z')}\n"
         f"NOW_LOCAL ({client['timezone']}): {now_local.replace(microsecond=0).isoformat()}\n"
+        "- In user-facing messages, DO NOT use relative words like 'tomorrow'/'this evening'; always include explicit local calendar dates (e.g., 'Thu Dec 4, 9:00–9:30 PM ET').\n"
     )
 
     sched_rules = ""
@@ -1231,12 +1590,23 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
             "schedule_cancel_appointment (to cancel a confirmed appointment). "
             "Keep replies short. If no times are available, use the lead agent.\n"
             "Scheduling rules:\n"
+            "- If the user mentions dates/times like 'tomorrow', 'Thursday', 'evening', first call schedule_interpret and then call schedule_propose with the returned filters.\n"
             "- When proposing times, enumerate them as 1), 2), 3) with local dates/times.\n"
+            "- If the user wants to see more options, call 'schedule_more'.\n"
             "- When the user picks, call 'schedule_hold' with 'slot_index' from the most recent proposals (do NOT construct dates yourself).\n"
             "- After holding, prompt the user to confirm and call 'schedule_confirm'.\n"
+            "- Before calling schedule_confirm, if no 'service_type' or 'notes' are set for this booking, ask ONE concise question: "
+            "  'What should we cover in the call? (one short line)'. If user gives a phrase, pass it as 'notes' and infer a 'service_type' "
+            "  (e.g., realtor: buying, selling; home services: estimate, repair). Keep it short.\n"
+            "- If the user declines to add details, proceed; the system may add a short automatic summary.\n"
             "- To cancel a tentative time that is only on hold, call 'schedule_cancel_hold'.\n"
             "- To cancel a confirmed appointment, call 'schedule_cancel_appointment'.\n"
             "(pass 'appointment_id' if you know it; otherwise cancel the next upcoming confirmed appointment for this user).\n"
+            "- If the user says they want to RESCHEDULE:\n"
+            "  1) call schedule_reschedule_request (pass appointment_id if known),\n"
+            "  2) if they mention timing like 'tomorrow afternoon', call schedule_interpret,\n"
+            "  3) call schedule_propose with those filters, then schedule_hold -> schedule_confirm.\n"
+            "  Do NOT cancel the existing appointment until a new time is CONFIRMED.\n"
         )
 
     system = (
@@ -1251,6 +1621,7 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
         f"{sched_rules}"
         f"- If you cite info, reference the doc title when available.\n"
         f"- Reply language should match user's message language when possible.\n"
+        f"- Map common phrases to 'service_type' (examples): realtor: buying, selling, showing, listing consult; home services: estimate, repair, emergency, maintenance.\n"
     )
 
     past_msgs, saw_current = fetch_recent_messages(client_id, user_e164, limit=history_max_turns, current_msg_sid=message_sid)
@@ -1310,15 +1681,50 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
     if client.get("scheduling_enabled", False):
         functions.extend([
             {
-                "name":"schedule_propose",
-                "description":"Propose up to 3 free time slots from owner-provided availability. Enumerate 1..N for the user.",
-                "parameters":{"type":"object",
-                              "properties":{
-                                  "days_ahead":{"type":"integer","minimum":1,"maximum":30}
-                              }
+                "name": "schedule_interpret",
+                "description": (
+                    "Interpret the user's natural-language scheduling request relative to NOW_LOCAL. "
+                    "Return a structured filter. Examples: 'tomorrow' => days_offset_start=1, days_offset_end=1; "
+                    "'Thursday morning' => weekday=THU, part_of_day='morning'; "
+                    "'next week' => next_week=true; 'this evening' => part_of_day='evening'."
+            ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                    "days_offset_start": {"type": "integer"},
+                    "days_offset_end": {"type": "integer"},
+                    "weekday": {"type": "string", "enum": ["MON","TUE","WED","THU","FRI","SAT","SUN"]},
+                    "local_date": {"type": "string", "description": "YYYY-MM-DD in BUSINESS TIMEZONE"},
+                    "part_of_day": {"type": "string", "enum": ["morning","afternoon","evening","night"]},
+                    "start_local_time": {"type": "string", "description": "HH:MM"},
+                    "end_local_time": {"type": "string", "description": "HH:MM"},
+                    "next_week": {"type": "boolean", "default": False}
+                    }
                 }
             },
             {
+                "name":"schedule_propose",
+                "description":"Propose up to 3 free time slots. Always call schedule_interpret first if the user mentions days/parts of day. Return explicit local dates.",
+                "parameters":{
+                "type":"object",
+                    "properties":{
+                        "local_date":{"type":"string"},
+                        "weekday":{"type":"string","enum":["MON","TUE","WED","THU","FRI","SAT","SUN"]},
+                        "part_of_day":{"type":"string","enum":["morning","afternoon","evening","night"]},
+                        "start_local_time":{"type":"string"},
+                        "end_local_time":{"type":"string"},
+                        "days_offset_start":{"type":"integer"},
+                        "days_offset_end":{"type":"integer"},
+                        "next_week":{"type":"boolean","default":False},
+                        "cursor_iso":{"type":"string"}
+                    }
+                }
+            },
+            {
+                "name":"schedule_more",
+                "description":"Get more options using the same filters as the last proposals (pagination).",
+                "parameters":{"type":"object","properties":{}}
+            },            {
                 "name":"schedule_hold",
                 "description":"Hold a chosen slot. ALWAYS pass 'slot_index' from the most recent proposals instead of constructing a date.",
                 "parameters":{
@@ -1338,6 +1744,18 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
                 "parameters":{"type":"object","properties":{}}
             },
             {
+                "name":"schedule_set_details",
+                "description":"Attach details (service_type, notes, name) to the current hold if active; otherwise to the most recent confirmed appointment within 15 minutes.",
+                "parameters":{
+                    "type":"object",
+                    "properties":{
+                    "service_type":{"type":"string"},
+                    "notes":{"type":"string"},
+                    "user_name":{"type":"string"}
+                    }
+                }
+            },
+            {
                 "name":"schedule_cancel_hold",
                 "description":"Cancel a tentative hold (not a confirmed appointment). Use when a held slot should be released.",
                 "parameters":{"type":"object","properties":{}}
@@ -1345,6 +1763,13 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
             {
                 "name":"schedule_cancel_appointment",
                 "description":"Cancel a confirmed appointment. If 'appointment_id' is omitted, cancel the next upcoming confirmed appointment for this user.",
+                "parameters":{"type":"object","properties":{
+                    "appointment_id":{"type":"string"}
+                }}
+            },
+            {
+                "name":"schedule_reschedule_request",
+                "description":"Begin a reschedule flow. If appointment_id is provided, target that appointment; otherwise use the next upcoming confirmed appointment for this user. Do NOT cancel anything yet; we will cancel the old appointment automatically only after the new one is confirmed.",
                 "parameters":{"type":"object","properties":{
                     "appointment_id":{"type":"string"}
                 }}
@@ -1380,19 +1805,38 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
                 logger.debug("orchestrate_user: Calling lead_agent_update with args: %s", args)
                 result = lead_agent_update(client, user_e164, args)
                 logger.debug("orchestrate_user: lead_agent_update result: %s", result)
+            elif fn == "schedule_interpret" and client.get("scheduling_enabled", False):
+                logger.debug("orchestrate_user: Calling schedule_interpret with args: %s", args)
+                # purely LLM-side; just echo to the next step
+                result = {"ok": True, "filters": args}
             elif fn == "schedule_propose" and client.get("scheduling_enabled", False):
-                r = schedule_propose(client, user_e164, args.get("days_ahead"))
-                # If empty availability, hint the model to switch to lead agent
-                if r.get("empty"):
-                    result = r
+                logger.debug("orchestrate_user: Calling schedule_propose with args: %s", args)
+                r = schedule_propose(client, user_e164, args)  # args may be filters from interpret()
+                result = r
+                # SHORT-CIRCUIT reply with rendered list so model can't say "tomorrow" incorrectly
+                if r.get("rendered_list"):
+                    #return {"ok": True, "reply": clamp_for_channel(r["rendered_list"], channel, max_reply_len), "tools": tool_results}
+                    return {"ok": True, "reply": r["rendered_list"], "tools": tool_results}
                 else:
-                    result = r
+                    logger.debug("orchestrate_user: schedule_propose returned no rendered_list")
+        
+            elif fn == "schedule_more" and client.get("scheduling_enabled", False):
+                logger.debug("orchestrate_user: Calling schedule_more")
+                r = schedule_more(client, user_e164)
+                result = r
+                if r.get("rendered_list"):
+                    #return {"ok": True, "reply": clamp_for_channel(r["rendered_list"], channel, max_reply_len), "tools": tool_results}
+                    return {"ok": True, "reply": r["rendered_list"], "tools": tool_results}
+                else:
+                    logger.debug("orchestrate_user: schedule_more returned no rendered_list")
             elif fn == "schedule_hold" and client.get("scheduling_enabled", False):
                 result = schedule_hold(client, user_e164, args.get("slot_iso",""), 
                                        args.get("service_type"), args.get("notes"),
                                        slot_index=args.get("slot_index"))
             elif fn == "schedule_confirm" and client.get("scheduling_enabled", False):
                 result = schedule_confirm(client, user_e164)
+            elif fn == "schedule_set_details" and client.get("scheduling_enabled", False):
+                result = schedule_set_details(client, user_e164, args.get("service_type"), args.get("notes"), args.get("user_name"))
             elif fn == "schedule_cancel_hold" and client.get("scheduling_enabled", False):
                 result = schedule_cancel_hold(client, user_e164)
             elif fn == "schedule_cancel_appointment" and client.get("scheduling_enabled", False):
@@ -1400,10 +1844,13 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
             # --- Back-compat: if model calls legacy name, route to hold-cancel ---
             elif fn == "schedule_cancel" and client.get("scheduling_enabled", False):
                 result = schedule_cancel_hold(client, user_e164)
+            elif fn == "schedule_reschedule_request" and client.get("scheduling_enabled", False):
+                result = schedule_reschedule_request(client, user_e164, args.get("appointment_id"))
             else:
                 logger.warning("orchestrate_user: Unknown tool requested: %s", fn)   
                 result = {"ok": False, "error": f"unknown tool {fn}"}
 
+            logger.debug("orchestrate_user: Tool %s returned result: %s", fn, result)
             tool_results[fn] = result
             msgs.append({"role":"assistant","content":None,"function_call":msg["function_call"]})
             msgs.append({"role":"function","name":fn,"content":json.dumps(result)})

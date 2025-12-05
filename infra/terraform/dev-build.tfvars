@@ -17,7 +17,7 @@ twilio_sid_required = false
 # GPT LLM model to use
 model_name = "gpt-4o-mini"
 # Max tool loops for orchestrator
-max_tool_loops = 2
+max_tool_loops = 3
 # conversation history
 max_history_turns = "10"
 # opt-in keyword for SMS consent
