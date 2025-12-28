@@ -5,6 +5,6 @@
 #   --embed-dim 1536
 python services/kb_ingest/ingest.py \
   --client-id mibec \
-  --source file --input config/mibec/MIBEC_FAQ.md \
-  --title "MIBEC.AI FAQ" \
+  --source file --input config/mibec/MIBEC_FAQ_20251212.md \
+  --title "MIBEC.AI FAQ v2025-12-12" \
   --embed-dim 1536

@@ -100,5 +100,8 @@
   },
   "vertical": {
     "S": "isv"
+  },
+  "welcome_message": {
+    "S": "Welcome to mibec.ai! Thanks for opting in. You can have your very own AI chatbot just like this to answer missed calls, help answer questions for your customers, capture leads and even schedule appointments. Want to learn more? Let me know how I can help!"
   }
 }

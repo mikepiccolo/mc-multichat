@@ -184,13 +184,17 @@ def lookup_client_by_to(to_e164: str) -> dict | None:
     brand = c.get("display_name", {}).get("S", client_id)
     escalation_phone_e164 = c.get("escalation_phone_e164", {}).get("S")
     owner_numbers = c.get("owner_numbers", {}).get("S", "")
+    max_reply_len = c.get("max_reply_len", {}).get("N", 600)
+    welcome_message = c.get("welcome_message", {}).get("S", "")
 
     return {"client_id": client_id, 
             "messaging_service_sid": msid, 
             "a2p_approved": a2p, 
             "escalation_phone_e164": escalation_phone_e164,
             "owner_numbers": owner_numbers,
-            "brand": brand}
+            "brand": brand,
+            "welcome_message": welcome_message,
+            "max_reply_len": int(max_reply_len) if max_reply_len else 600}
 
 def consent_exists(client_id: str, from_e164: str) -> bool:
     logger.debug("Checking consent for client %s and user %s", client_id, from_e164)
@@ -272,6 +276,13 @@ def update_message_status(form: dict):
         "ts": {"S": ts}
     }
     ddb().put_item(TableName=tbl_convos(), Item=item)
+
+def add_opt_out_notice(reply: str, max_len: int) -> str:
+    if not "Reply STOP to opt out".casefold() in reply.casefold():
+        notice = "\n\nReply STOP to opt out"
+        if len(reply) + len(notice) <= max_len:
+            return reply + notice
+    return reply
 
 def send_reply_via_twilio(msid: str, to_e164: str, body: str):
     sid = get_secret(os.environ["TWILIO_SID_ARN"])
@@ -408,9 +419,11 @@ def handle_inbound(event):
 
             # Acknowledge opt-in only if we can legally/textually reply
             if client.get("a2p_approved", False) and client.get("messaging_service_sid"):
-                ack = f"{client['brand']}: Thanks for opting in to texts. How can we help you today?\n\nReply STOP to opt out. Msg&Data rates may apply."
+                # customize ack message per client usimng welcome message
+                ack = client.get("welcome_message") or f"{client['brand']}: Thanks for opting in to texts. How can we help you today?"
                 try:
-                    sent = send_reply_via_twilio(client["messaging_service_sid"], from_e164, ack)
+                    final = add_opt_out_notice(ack, client.get("max_reply_len", 600))
+                    sent = send_reply_via_twilio(client["messaging_service_sid"], from_e164, final)
                     put_outbound_message(client["client_id"], to_e164, from_e164, ack, sent.get("sid"))
                     return {"statusCode": 200, "headers": JSON, "body": json.dumps({"ok": True, "ack": True})}
                 except Exception:
@@ -424,13 +437,13 @@ def handle_inbound(event):
             # fall through to normal inbound processing
    
     # Respect STOP/HELP (belt + suspenders; Twilio Advanced Opt-Out should be enabled on MS)
-    if body_text.upper() in {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"}:
+    if body_text.upper() in {"STOP", "STOPALL", "UNSUBSCRIBE", "END", "QUIT"}:
         # no reply here; Twilio will handle with its default if Advanced Opt-Out is enabled
         return {"statusCode": 200, "headers": JSON, "body": json.dumps({"ok": True})}
 
     if body_text.upper() == "HELP":
         # Optional human-readable HELP
-        help_msg = f"{client['brand']}: Reply STOP to opt out. Msg&Data rates may apply."
+        help_msg = f"{client['brand']}: Reply STOP to opt out. Reply START to opt back in. Msg&Data rates may apply."
         if client.get("messaging_service_sid") and client.get("a2p_approved", False):
             try:
                 send_reply_via_twilio(client["messaging_service_sid"], from_e164, help_msg)
@@ -447,7 +460,8 @@ def handle_inbound(event):
         reply_text = orchestrate_reply(client["client_id"], from_e164, to_e164, body_text, form.get("MessageSid")) or \
                      f"{client['brand']}: Thanks for your message. A specialist will follow up shortly."
         try:
-            sent = send_reply_via_twilio(client["messaging_service_sid"], from_e164, reply_text)
+            final = add_opt_out_notice(reply_text, client.get("max_reply_len", 600))
+            sent = send_reply_via_twilio(client["messaging_service_sid"], from_e164, final)
             put_outbound_message(client["client_id"], to_e164, from_e164, reply_text, sent.get("sid", ""))
         except Exception:
             # swallow errors; webhook must return 200 to Twilio

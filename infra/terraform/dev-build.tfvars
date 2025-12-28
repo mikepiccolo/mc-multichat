@@ -16,6 +16,7 @@ log_level = "DEBUG"
 twilio_sid_required = false
 # GPT LLM model to use
 model_name = "gpt-4o-mini"
+#model_name = "gpt-5-mini"
 # Max tool loops for orchestrator
 max_tool_loops = 3
 # conversation history

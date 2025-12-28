@@ -1415,12 +1415,13 @@ def clamp_for_channel(text: str, channel: str, max_len: int) -> str:
         return t
     return text.strip()
 
-def add_opt_out_notice(reply: str, channel: str, max_len: int) -> str:
-    if channel == "sms" and not "Reply STOP to opt out".casefold() in reply.casefold():
-        notice = "\n\nReply STOP to opt out"
-        if len(reply) + len(notice) <= max_len:
-            return reply + notice
-    return reply
+# # Opt-out notice for SMS (disabled for now - handle in twilio_sms and twilio_studio)
+# def add_opt_out_notice(reply: str, channel: str, max_len: int) -> str:
+#     if channel == "sms" and not "Reply STOP to opt out".casefold() in reply.casefold():
+#         notice = "\n\nReply STOP to opt out"
+#         if len(reply) + len(notice) <= max_len:
+#             return reply + notice
+#     return reply
 
 # ------------ Orchestrator ------------
 def orchestrate_owner(client_id: str, channel: str, user_e164: str, text: str, message_sid: str | None, event: str | None = None) -> dict:
@@ -1862,17 +1863,19 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
         if not final:
             break
 
-        reply = add_opt_out_notice(final, channel, max_reply_len)
-        reply = clamp_for_channel(reply, channel, max_reply_len)
+        # handle opt out notice in twilio layer
+        # reply = add_opt_out_notice(final, channel, max_reply_len)
+        reply = clamp_for_channel(final, channel, max_reply_len)
         #reply = final.strip()
         logger.info("orchestrate_user: Final reply generated for client %s and user %s: %s", client_id, user_e164, reply)
         return {"ok": True, "reply": reply, "tools": tool_results}
 
     # If we exit loop without final content, backstop with a generic reply
     backstop = "Thanks for reaching out—can you share a bit more about what you need?"
-    reply = add_opt_out_notice(backstop,channel,max_reply_len)
+    # handle opt out notice in twilio layer
+    #reply = add_opt_out_notice(backstop,channel,max_reply_len)
     logger.warning("orchestrate_user: No final reply generated; using backstop reply. Client: %s, User: %s", client_id, user_e164 )
-    return {"ok": True, "reply": clamp_for_channel(reply, channel, max_reply_len), "tools": tool_results}
+    return {"ok": True, "reply": clamp_for_channel(backstop, channel, max_reply_len), "tools": tool_results}
 
 def orchestrate(client_id: str, channel: str, user_e164: str, text: str, message_sid: str | None, 
                 event: str | None = None, transcript: str | None = None, role: str | None = None) -> dict:

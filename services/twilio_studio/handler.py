@@ -237,14 +237,16 @@ def lookup_client_via_ddb(called_e164: str):
     consent_message = S("consent_message",None) or os.environ.get("DEFAULT_CONSENT_MESSAGE", "Press 1 to consent to receive SMS text messages. Message and data rates may apply. Reply STOP to opt out at any time.")  
     messaging_service_sid = S("messaging_service_sid","")
     a2p_approved = B("a2p_approved", False)
-    
+    max_reply_len = item.get("max_reply_len", {}).get("N", 600)
+
     return {"client_id": client_id, 
             "display_name": S("display_name",""),
             "forward_to": forward_to, 
             "greeting_message": greeting_message, 
             "consent_message": consent_message,
             "messaging_service_sid": messaging_service_sid,
-            "a2p_approved": a2p_approved
+            "a2p_approved": a2p_approved,
+            "max_reply_len": int(max_reply_len) if max_reply_len else 600
             }
 
 # ---------- persist helpers ----------
@@ -310,6 +312,13 @@ def _last10(e164_or_any: str | None) -> str | None:
     last10 = digs[-10:] if len(digs) >= 10 else digs or None
     logger.debug("Last 10 digits: %s", last10);
     return last10
+
+def add_opt_out_notice(reply: str, max_len: int) -> str:
+    if not "Reply STOP to opt out".casefold() in reply.casefold():
+        notice = "\n\nReply STOP to opt out"
+        if len(reply) + len(notice) <= max_len:
+            return reply + notice
+    return reply
 
 # ---------- Orchestrator invocation ----------
 def invoke_orchestrator(client_id: str, from_e164: str, text: str, call_sid: str, transcript: str | None) -> str:
@@ -527,11 +536,13 @@ def handle_voicemail(event):
             # Fallback template
             brand = client["display_name"]
             if transcript:
-                reply_text = f"{brand}: Got your voicemail—thanks for the details. I can help next steps. What’s the best time to text/call back? Reply STOP to opt out."
+                reply_text = f"{brand}: Got your voicemail—thanks for the details. I can help next steps. What’s the best time to text/call back?"
             else:
-                reply_text = f"{brand}: Sorry we missed your call. How can we help? Reply STOP to opt out."
+                reply_text = f"{brand}: Sorry we missed your call. How can we help?"
+        # Ensure opt-out notice
+        final = add_opt_out_notice(reply_text, client["max_reply_len"])
         try:
-            sent = send_sms_via_ms(client["messaging_service_sid"], caller, reply_text)
+            sent = send_sms_via_ms(client["messaging_service_sid"], caller, final)
             put_outbound_message(client_id, called, caller, reply_text, sent.get("sid"))
         except Exception as e:
             # swallow; we still wrote the event
@@ -580,10 +591,11 @@ def handle_no_voicemail(event):
         reply_text = invoke_orchestrator(client_id, caller, "", call_sid, None)
         if not reply_text:
             brand = client["display_name"]
-            reply_text = f"{brand}: Sorry we missed your call. How can we help? Reply STOP to opt out."
+            reply_text = f"{brand}: Sorry we missed your call. How can we help?"
         try:
-            sent = send_sms_via_ms(client["messaging_service_sid"], caller, reply_text)
-            
+            final = add_opt_out_notice(reply_text, client["max_reply_len"])
+            sent = send_sms_via_ms(client["messaging_service_sid"], caller, final)
+
             put_outbound_message(client_id, called, caller, reply_text, sent.get("sid"))
             
             send_sms_via_ms(client["messaging_service_sid"], to_e164=client.get("forward_to",""), 
