@@ -2,18 +2,18 @@ data "aws_vpc" "default" {
   default = true
 }
 
-data "aws_subnets" "default_vpc_subnets" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
-}
+# data "aws_subnets" "default_vpc_subnets" {
+#   filter {
+#     name   = "vpc-id"
+#     values = [data.aws_vpc.default.id]
+#   }
+# }
 
-resource "aws_db_subnet_group" "pg" {
-  name       = "${local.name_prefix}-pg-subnets"
-  subnet_ids = data.aws_subnets.default_vpc_subnets.ids
-  tags       = local.tags
-}
+# resource "aws_db_subnet_group" "pg" {
+#   name       = "${local.name_prefix}-pg-subnets"
+#   subnet_ids = data.aws_subnets.default_vpc_subnets.ids
+#   tags       = local.tags
+# }
 
 resource "aws_security_group" "pg" {
   name        = "${local.name_prefix}-pg-sg"
@@ -38,13 +38,23 @@ resource "aws_security_group" "pg" {
   tags = local.tags
 }
 
+resource "aws_db_subnet_group" "pg" {
+  name_prefix = "${local.name_prefix}-pg-subnets-"
+  subnet_ids  = [for s in aws_subnet.private : s.id]
+  tags        = local.tags
+
+  lifecycle {
+    create_before_destroy = true
+  } 
+}
+
 resource "random_password" "rds_master" {
   length  = 32
   special = true
 }
 
 resource "aws_db_instance" "pg" {
-  identifier                 = "${local.name_prefix}-pg"
+  identifier                 = "${local.name_prefix}-pg-${var.db_identifier_suffix}"
   engine                     = "postgres"
   engine_version             = var.db_engine_version
   instance_class             = var.db_instance_class
@@ -55,7 +65,7 @@ resource "aws_db_instance" "pg" {
   password                   = random_password.rds_master.result
   port                       = 5432
   db_subnet_group_name       = aws_db_subnet_group.pg.name
-  vpc_security_group_ids     = [aws_security_group.pg.id]
+  vpc_security_group_ids     = [aws_security_group.rds.id]
   publicly_accessible        = var.db_publicly_accessible
   multi_az                   = var.db_multi_az
   backup_retention_period    = var.db_backup_retention_days
@@ -64,17 +74,10 @@ resource "aws_db_instance" "pg" {
   auto_minor_version_upgrade = true
   apply_immediately          = true
   tags                       = local.tags
+
+  lifecycle {
+    create_before_destroy = true
+    replace_triggered_by  = [aws_db_subnet_group.pg.name]
+  }
 }
 
-# postgres outputs - see outputs.tf
-#output "rds_endpoint" {
-#  value = aws_db_instance.pg.address
-#}
-
-#output "rds_port" {
-#  value = aws_db_instance.pg.port
-#}
-
-#output "rds_db_name" {
-#  value = var.db_name
-#}

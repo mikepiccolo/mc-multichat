@@ -3,6 +3,8 @@
 
 CREATE SCHEMA IF NOT EXISTS kb;
 
+SET search_path TO public, kb;
+
 CREATE TABLE IF NOT EXISTS kb.documents (
 id           BIGSERIAL PRIMARY KEY,
 client_id    TEXT NOT NULL,

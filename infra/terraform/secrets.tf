@@ -25,6 +25,12 @@ resource "aws_secretsmanager_secret_version" "rds_credentials_v" {
     username = var.db_master_username,
     password = random_password.rds_master.result
   })
+
+  depends_on = [aws_db_instance.pg]
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # Twilio credentials

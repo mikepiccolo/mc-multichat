@@ -49,6 +49,10 @@ variable "db_name" {
   default     = "multichat"
 }
 
+variable "db_identifier_suffix" {
+  type    = string
+  default = "private"  # bump to vpc2 if you need a fresh replace
+}
 variable "db_master_username" {
   description = "Master username for Postgres"
   type        = string
@@ -132,3 +136,55 @@ variable "optin_keyword" {
   type        = string
   default     = "hello"
 }
+
+# -- VPC / Networking vars ---- #
+variable "vpc_cidr" { 
+  type = string  
+  default = "10.0.0.0/16" 
+}
+
+variable "az_count" { 
+  type = number  
+  default = 3 
+
+}
+variable "nat_per_az" { 
+  type = bool    
+  default = false 
+} # dev=false, prod=true
+
+variable "enable_ssm_bastion" { 
+  type = bool    
+  default = true 
+}
+
+# Flow logs
+variable "flow_log_retention_days" { 
+    type = number 
+    default = 14 
+}
+
+# Interface endpoints (optional, can disable for dev)
+variable "enable_interface_endpoints" { 
+  type = bool 
+  default = false 
+}
+
+# Bastion SG (SSM preferred; SSH disabled by default)
+variable "bastion_ssh_cidr" { 
+  type = list(string) 
+  default = []
+} # e.g., ["X.Y.Z.W/32"]
+
+variable "enable_bastion" { 
+  type = bool 
+  default = true 
+}
+
+variable "aws_profile" {
+  description = "AWS profile to use"
+  type        = string
+  default     = "lower"
+}
+
+

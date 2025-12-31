@@ -53,5 +53,10 @@ resource "aws_lambda_function" "kb_search" {
     }
   }
 
+  vpc_config {
+    subnet_ids         = [for s in aws_subnet.private : s.id]
+    security_group_ids = [aws_security_group.lambda.id]
+  }
+  
   tags = local.tags
 }
