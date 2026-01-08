@@ -45,7 +45,7 @@ resource "aws_db_subnet_group" "pg" {
 
   lifecycle {
     create_before_destroy = true
-  } 
+  }
 }
 
 resource "random_password" "rds_master" {
@@ -59,6 +59,7 @@ resource "aws_db_instance" "pg" {
   engine_version             = var.db_engine_version
   instance_class             = var.db_instance_class
   allocated_storage          = var.db_allocated_storage_gb
+  max_allocated_storage      = var.db_max_allocated_storage_gb
   storage_type               = "gp3"
   db_name                    = var.db_name
   username                   = var.db_master_username
@@ -70,10 +71,21 @@ resource "aws_db_instance" "pg" {
   multi_az                   = var.db_multi_az
   backup_retention_period    = var.db_backup_retention_days
   skip_final_snapshot        = var.db_skip_final_snapshot
-  deletion_protection        = false
+  deletion_protection        = var.db_delete_protection
   auto_minor_version_upgrade = true
-  apply_immediately          = true
-  tags                       = local.tags
+  apply_immediately          = var.db_apply_immediately
+
+  # ---- Observability ----
+  performance_insights_enabled = var.db_performance_insights_enabled
+
+  performance_insights_retention_period = var.db_performance_insights_enabled ? var.db_performance_insights_retention_period : null
+  performance_insights_kms_key_id       = var.db_performance_insights_enabled ? var.db_performance_insights_kms_key_id : null
+
+  monitoring_interval = var.db_enhanced_monitoring_interval
+  monitoring_role_arn = var.db_enhanced_monitoring_interval > 0 ? aws_iam_role.rds_monitoring.arn : null
+
+  tags = local.tags
+
 
   lifecycle {
     create_before_destroy = true

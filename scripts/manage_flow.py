@@ -3,6 +3,7 @@
 Provision a new client (or update the shared Studio Flow).
 
 Features:
+- --profile {aws_profile} to specify AWS CLI profile for secrets access (lower | prod)
 - --flow-action {upsert|create|update|skip} controls Flow management (default: upsert)
 - --flow-friendly-name sets the Flow FriendlyName (default: '{NAME_PREFIX}-missed-call')
 - --flow-template sets the Flow template path (default: twilio/flow_missed_call.template.json)
@@ -28,6 +29,7 @@ Flow update (update existing flow):
 
 Flow create (create new flow, error if exists):
     python scripts/manage_flow.py \
+        --profile lower \
         --flow-action create \
         --flow-friendly-name mc-multichat-dev-missed-call \
         --flow-template twilio/flow_missed_call.template.json
@@ -43,6 +45,10 @@ from typing import Any, Dict, List, Optional
 import boto3
 import requests
 
+def get_session(profile_name: str | None):
+    if profile_name:
+        return boto3.Session(profile_name=profile_name)
+    return boto3.Session()
 
 # ---------- Logging helpers ----------
 def info(msg: str, **kv):
@@ -65,8 +71,8 @@ def error(msg: str, **kv):
 
 
 # ---------- Secrets helpers ----------
-def get_secret(arn_or_name: str) -> str:
-    sm = boto3.client("secretsmanager")
+def get_secret(session, arn_or_name: str) -> str:
+    sm = session.client("secretsmanager")
     return sm.get_secret_value(SecretId=arn_or_name)["SecretString"]
 
 
@@ -164,6 +170,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Studio Flow FriendlyName (default: '{NAME_PREFIX}-missed-call')",
     )
+    ap.add_argument(
+        "--profile",
+        default=None,
+        required=True,
+        choices=["lower", "prod"],
+        help="AWS CLI profile to use for secrets access (default: current environment)",
+    )
     return ap.parse_args()
 
 
@@ -187,11 +200,13 @@ def main() -> int:
     # Flow FriendlyName
     info("Flow target", friendly_name=flow_name)
 
+    session = get_session(args.profile)
+
     # Secrets
     try:
-        twilio_sid = get_secret(f"{name_prefix}/twilio_account_sid")
-        twilio_tok = get_secret(f"{name_prefix}/twilio_auth_token")
-        studio_bearer = get_secret(f"{name_prefix}/studio_bearer")
+        twilio_sid = get_secret(session,f"{name_prefix}/twilio_account_sid")
+        twilio_tok = get_secret(session,f"{name_prefix}/twilio_auth_token")
+        studio_bearer = get_secret(session,f"{name_prefix}/studio_bearer")
         info("Secrets loaded")
     except Exception as e:
         error("Failed to load secrets", error=str(e)); return 2

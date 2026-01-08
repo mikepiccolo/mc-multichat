@@ -43,6 +43,12 @@ variable "db_allocated_storage_gb" {
   default     = 20
 }
 
+variable "db_max_allocated_storage_gb" {
+  description = "Max storage for autoscaling (GiB). Must be >= allocated_storage."
+  type        = number
+  default     = null
+}
+
 variable "db_name" {
   description = "Initial database name"
   type        = string
@@ -87,6 +93,56 @@ variable "db_allow_cidrs" {
   description = "List of CIDR blocks allowed to connect to Postgres"
   type        = list(string)
   default     = ["0.0.0.0/0"] # tighten in prod
+}
+
+variable "db_delete_protection" {
+  description = "Enable deletion protection for the RDS instance"
+  type        = bool
+  default     = false
+}
+
+variable "db_maintenance_window" {
+  description = "RDS maintenance window (UTC) e.g. sun:05:00-sun:06:00"
+  type        = string
+  default     = null
+}
+
+variable "db_backup_window" {
+  description = "RDS backup window (UTC) e.g. 06:00-07:00"
+  type        = string
+  default     = null
+}
+
+variable "db_apply_immediately" {
+  description = "Whether to apply changes immediately (true for dev, false for prod)"
+  type        = bool
+  default     = true
+}
+
+# ---- RDS Observability ----
+
+variable "db_performance_insights_enabled" {
+  description = "Enable RDS Performance Insights"
+  type        = bool
+  default     = false
+}
+
+variable "db_performance_insights_retention_period" {
+  description = "Performance Insights retention in days (typically 7 or 731)"
+  type        = number
+  default     = 7
+}
+
+variable "db_performance_insights_kms_key_id" {
+  description = "Optional KMS key ARN/ID for Performance Insights (null uses AWS managed key)"
+  type        = string
+  default     = null
+}
+
+variable "db_enhanced_monitoring_interval" {
+  description = "Enhanced monitoring interval in seconds (0 disables). Typical: 60"
+  type        = number
+  default     = 0
 }
 
 variable "log_level" {
@@ -187,4 +243,8 @@ variable "aws_profile" {
   default     = "lower"
 }
 
-
+variable "api_base_url" {
+  description = "API base URL for the deployed environment"
+  type        = string
+  default     = "https://api.dev.mibec.ai"
+}

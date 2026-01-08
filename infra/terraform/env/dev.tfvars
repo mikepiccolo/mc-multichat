@@ -10,6 +10,8 @@ db_engine_version="16.8"
 db_publicly_accessible=false
 db_backup_retention_days=0
 db_name = "multichatdev"
+db_performance_insights_enabled  = false
+db_enhanced_monitoring_interval  = 0
 
 log_level = "DEBUG"
 # secure twilio endpoints using Twilio SID
@@ -38,3 +40,6 @@ enable_bastion = true
 
 # AWS profile to use
 aws_profile = "lower"
+
+# api base url for dev
+api_base_url = "https://api.dev.mibec.ai"

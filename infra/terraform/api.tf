@@ -365,10 +365,13 @@ resource "aws_api_gateway_stage" "stage" {
   tags = local.tags
 }
 # Outputs
-output "api_base_url" {
+output "apigw_base_url" {
   value = "https://${aws_api_gateway_rest_api.rest.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.stage.stage_name}"
 }
 
+output "api_base_url" {
+  value = var.api_base_url
+}
 output "health_url" {
   value = "https://${aws_api_gateway_rest_api.rest.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_stage.stage.stage_name}/health"
 }

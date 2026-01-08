@@ -1,6 +1,6 @@
 #!/bin/bash
 aws ssm start-session \
-    --profile dev \
+    --profile lower \
     --target i-05f370a9cece42006 \
     --document-name AWS-StartPortForwardingSessionToRemoteHost \
     --region us-east-1 \
