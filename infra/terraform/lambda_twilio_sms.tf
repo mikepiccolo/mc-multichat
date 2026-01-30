@@ -34,7 +34,7 @@ resource "aws_lambda_function" "twilio_sms" {
   runtime          = "python3.13"
   architectures    = ["arm64"]
   source_code_hash = data.archive_file.twilio_sms_zip.output_base64sha256
-  timeout          = 30
+  timeout          = 60
 
   environment {
     variables = {

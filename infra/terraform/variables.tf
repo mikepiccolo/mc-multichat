@@ -248,3 +248,19 @@ variable "api_base_url" {
   type        = string
   default     = "https://api.dev.mibec.ai"
 }
+
+variable "root_zone_name" {
+  description = "Route53 hosted zone name, e.g. mibec.ai or dev.mibec.ai"
+  type        = string
+}
+
+variable "legal_subdomain" {
+  description = "Subdomain prefix for legal site"
+  type        = string
+  default     = "legal"
+}
+
+variable "legal_bucket_name" {
+  description = "S3 bucket name for legal site origin"
+  type        = string
+}

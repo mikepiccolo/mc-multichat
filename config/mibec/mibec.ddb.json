@@ -60,7 +60,7 @@
     "S": "+12014106922"
   },
   "lead_required_fields": {
-    "S": ""
+    "S": "[\"name\", \"best_contact\", \"request_summary\", \"urgency\"]"
   },
   "lead_vertical": {
     "S": "isv"
@@ -75,7 +75,7 @@
     "BOOL": true
   },
   "scheduling_link": {
-    "S": ""
+    "S": "https://calendar.app.google/CLYf3QvtHpqtThJg7"
   },
   "sched_buffer_minutes": {
     "S": "5"

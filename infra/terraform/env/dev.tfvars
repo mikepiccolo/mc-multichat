@@ -17,10 +17,10 @@ log_level = "DEBUG"
 # secure twilio endpoints using Twilio SID
 twilio_sid_required = false
 # GPT LLM model to use
-model_name = "gpt-4o-mini"
-#model_name = "gpt-5-mini"
+#model_name = "gpt-4o-mini"
+model_name = "gpt-5-mini"
 # Max tool loops for orchestrator
-max_tool_loops = 3
+max_tool_loops = 5
 # conversation history
 max_history_turns = "10"
 # opt-in keyword for SMS consent
@@ -43,3 +43,8 @@ aws_profile = "lower"
 
 # api base url for dev
 api_base_url = "https://api.dev.mibec.ai"
+
+root_zone_name = "dev.mibec.ai"
+# cloudfront legal distribution
+legal_subdomain = "legal"
+legal_bucket_name = "dev.mibec.ai-legal"

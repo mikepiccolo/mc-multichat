@@ -33,7 +33,7 @@ resource "aws_lambda_function" "chat_orchestrator" {
   handler          = "handler.lambda_handler"
   runtime          = "python3.13"
   architectures    = ["arm64"]
-  timeout          = 30
+  timeout          = 60
 
   environment {
     variables = {

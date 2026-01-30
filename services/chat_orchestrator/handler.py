@@ -123,9 +123,9 @@ def fetch_recent_messages(client_id: str, user_e164: str, limit: int = 10, curre
         if current_msg_sid and sid and sid == current_msg_sid and typ == "inbound_msg":
             saw_current = True
         if typ == "inbound_msg":
-            msgs.append({"role": "user", "content": _S(it, "body", "")})
+            msgs.append(mk_msg("user", _S(it, "body", "")))
         elif typ == "outbound_msg":
-            msgs.append({"role": "assistant", "content": _S(it, "body", "")})
+            msgs.append(mk_msg("assistant", _S(it, "body", "")))
         # ignore other types for chat context
     return msgs, saw_current
 
@@ -891,6 +891,17 @@ def _render_slot_list(slots: list[dict], tz: ZoneInfo) -> str:
     return "Here are some available times:\n" + "\n".join(lines)
 
 # ------------- Scheduling tool agent -------------
+def _scheduling_link_if_enabled(client: dict) -> str | None:
+    if not client.get("scheduling_enabled", False):
+        return None
+    link = (client.get("scheduling_link") or "").strip()
+    if not link:
+        return None
+    # optional: basic safety
+    if not (link.startswith("http://") or link.startswith("https://")):
+        return None
+    return link
+
 def schedule_propose(client: dict, user_e164: str, args: dict | None = None) -> dict:
     logger.debug("schedule_propose: Proposing schedule slots for client %s and user %s", client["client_id"], user_e164)
     """Generate and store proposed slots for the user based on client settings."""
@@ -1384,27 +1395,76 @@ def _twilio_send_sms(msid: str, to_e164: str, body: str) -> dict:
     return r.json()
 
 # ------------ OpenAI Chat (function calling) ------------
-def openai_chat(messages, functions):
-    logger.debug("openai_chat: calling OpenAI chat API with %d messages and %d functions", len(messages), len(functions))
-    model = os.environ.get("MODEL_NAME", "gpt-4o-mini")
+def openai_chat(input_list, tools, tool_choice=None, instructions=None):
+    logger.debug("openai_chat: calling Responses API with %d input items and %d tools", len(input_list), len(tools))
+    """
+    Responses API call for GPT-5 tool calling.
+    input_list: list of items (role messages + prior response.output + function_call_output)
+    tools: list of tool definitions
+    tool_choice: optional forced tool name (string)
+    """
+    model = os.environ.get("MODEL_NAME", "gpt-5-mini")
     key   = get_secret(os.environ["OPENAI_SECRET_ARN"])
+
     payload = {
         "model": model,
-        "messages": messages,
-        "functions": functions,
-        "function_call": "auto",
-        "temperature": 0.3,
+        "input": input_list,
+        "tools": tools
     }
+
+    if instructions:
+        payload["instructions"] = instructions
+
+   # Optional force: "Call THIS tool now"
+    if tool_choice:
+        payload["tool_choice"] = {"type": "function", "name": tool_choice}
+        logger.debug("openai_chat: Forcing tool choice: %s", tool_choice)
+    else:
+        payload["tool_choice"] = "auto"
 
     logger.debug("openai_chat: OpenAI chat payload: %s", json.dumps(payload))
 
-    r = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        data=json.dumps(payload), timeout=30
-    )
-    r.raise_for_status()
-    return r.json()
+    r = None
+
+    try:
+        r = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            data=json.dumps(payload),
+            timeout=30,
+        )
+
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        logger.error("OpenAI status=%s body=%s", r.status_code, r.text)
+        raise
+
+    resp = r.json()
+
+    # Extract tool calls from resp["output"]
+    tool_calls = []
+    for item in resp.get("output", []):
+        if item.get("type") == "function_call":
+            tool_calls.append({
+                "name": item.get("name"),
+                "arguments": item.get("arguments") or "{}",
+                "id": item.get("id"),
+                "call_id": item.get("call_id")
+            })
+
+    # output_text is shown in the guide as the easy way to grab final text
+    output_text = resp.get("output_text") or extract_output_text(resp)
+
+    return resp.get("id"), output_text, tool_calls, resp
+
+def extract_output_text(raw: dict) -> str:
+    parts = []
+    for item in raw.get("output", []):
+        if item.get("type") == "message":
+            for c in item.get("content", []):
+                if c.get("type") in ("output_text", "text"):
+                    parts.append(c.get("text", ""))
+    return "\n".join([p for p in parts if p]).strip()
 
 def clamp_for_channel(text: str, channel: str, max_len: int) -> str:
     logger.debug("Clamping reply for channel %s to max length %d", channel, max_len)
@@ -1415,15 +1475,48 @@ def clamp_for_channel(text: str, channel: str, max_len: int) -> str:
         return t
     return text.strip()
 
-# # Opt-out notice for SMS (disabled for now - handle in twilio_sms and twilio_studio)
-# def add_opt_out_notice(reply: str, channel: str, max_len: int) -> str:
-#     if channel == "sms" and not "Reply STOP to opt out".casefold() in reply.casefold():
-#         notice = "\n\nReply STOP to opt out"
-#         if len(reply) + len(notice) <= max_len:
-#             return reply + notice
-#     return reply
-
 # ------------ Orchestrator ------------
+def _safe_json(obj, default=None):
+    if default is None:
+        default = {}
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj
+    if not isinstance(obj, str):
+        return default
+    try:
+        return json.loads(obj)
+    except Exception:
+        return default
+
+# create a message for OpenAI chat
+def mk_msg(role: str, content: str) -> dict:
+    return {"role": role, "content": content}
+
+# create a tool definition for OpenAI function calling
+def mk_tool(name: str, description: str, parameters: dict) -> dict:
+    return {"type": "function", "name": name, "description": description, "parameters": parameters}
+
+# Check if text looks like scheduling intent to force schedule tools call
+def _looks_like_scheduling_intent(text: str) -> bool:
+    t = (text or "").lower()
+    keywords = [
+        "schedule", "appointment", "book", "booking",
+        "availability", "available times"
+    ]
+    exclude = ["cancel", "reschedule"]
+
+    return any(k in t for k in keywords) and not any(e in t for e in exclude)
+
+RELATIVE_HINTS = ["today","tomorrow","tonight","this evening","morning","afternoon","next week",
+                 "monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+
+# Check if text has relative time hints to force schedule_intent
+def _has_relative_time_hint(text: str) -> bool:
+    t = (text or "").lower()
+    return any(h in t for h in RELATIVE_HINTS)
+
 def orchestrate_owner(client_id: str, channel: str, user_e164: str, text: str, message_sid: str | None, event: str | None = None) -> dict:
     logger.debug("orchestrate_owner: Orchestrating owner chat for client %s, channel %s, user %s", client_id, channel, user_e164)
     client = get_client(client_id)
@@ -1434,7 +1527,7 @@ def orchestrate_owner(client_id: str, channel: str, user_e164: str, text: str, m
 
     owner_now_anchor = (
         f"NOW_UTC: {now_utc.replace(microsecond=0).isoformat().replace('+00:00','Z')}\n"
-        f"NOW_LOCAL: ({client['timezone']}): {now_local.replace(microsecond=0).isoformat()}\n"
+        f"NOW_LOCAL ({client['timezone']}): {now_local.replace(microsecond=0).isoformat()}\n"
         "Rules:\n"
         "- Interpret relative dates like 'today', 'tomorrow', 'this Friday' relative to NOW_LOCAL's calendar date.\n"
         "- When replying to the OWNER, display times in the BUSINESS TIMEZONE only; do NOT show 'Z' or UTC.\n"
@@ -1454,8 +1547,12 @@ def orchestrate_owner(client_id: str, channel: str, user_e164: str, text: str, m
     max_reply_len = client["max_reply_len"] if channel.startswith("sms") else max(600, client["max_reply_len"])
     #history_max_turns = int(os.environ.get("MAX_HISTORY_TURNS","10"))
 
-    msgs=[{"role":"system","content": persona_owner}]
+    # no longer using system role (gpt-5), use instructions instead
+    #msgs=[mk_msg("system", persona_owner)]
+    instructions = persona_owner
 
+    # msgs used for chat history + current message and sent to OpenAI as input
+    msgs = []
     logger.debug("orchestrate_owner: Fetching recent messages for context")
     # Read last 2 messages to capture context from owner and in case model asked a follow up question
     past_msgs, saw_current = fetch_recent_messages(client_id, user_e164, limit=2, current_msg_sid=message_sid)
@@ -1465,69 +1562,116 @@ def orchestrate_owner(client_id: str, channel: str, user_e164: str, text: str, m
     # We do not include customer history for owner mode (keeps it clean) - add if needed later
     if not saw_current and text:
         logger.debug("orchestrate_owner: Adding current owner message to context")
-        msgs.append({"role":"user","content": text})
+        msgs.append(mk_msg("user", text))
 
-    functions = [
-        {
-            "name":"availability_upsert",
-            "description":"Store availability windows. Anchor relative dates to NOW_LOCAL in the system message. "
-                          "Return only FUTURE intervals within 30 days. Output UTC ISO (Z).",
-            "parameters":{"type":"object","properties":{
-                "blocks":{"type":"array","items":{"type":"object","properties":{
-                    "start_iso":{"type":"string","description":"UTC ISO8601 start, e.g., 2025-11-11T19:00:00Z"},
-                    "end_iso":{"type":"string","description":"UTC ISO8601 end"}
-                },"required":["start_iso","end_iso"]}}
-            },"required":["blocks"]}
-        },
-        {
-            "name":"availability_clear",
-            "description":"List future availability windows. For OWNER replies, ALWAYS use each window’s 'label_display' as-is (do not restate or modify dates/times).",
-            "parameters":{"type":"object","properties":{
-                "clear_all":{"type":"boolean","default":False},
-                "start_iso":{"type":"string"},
-                "end_iso":{"type":"string"}
-            }}
-        },
-        {
-            "name":"availability_list",
-            "description":"List future availability windows. For OWNER display, ALWAYS show each window’s label_local "
-                      "(business timezone) instead of raw ISO times.",
-            "parameters":{"type":"object","properties":{
-                "days_ahead":{"type":"integer","default":30}
-            }}
-        }
+    tools = [
+        mk_tool(
+            "availability_upsert",
+            "Store availability windows. Anchor relative dates to NOW_LOCAL in the system message. "
+            "Return only FUTURE intervals within 30 days. Output UTC ISO (Z).",
+            {
+                "type": "object",
+                "properties": {
+                    "blocks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "start_iso": {"type": "string", "description": "UTC ISO8601 start, e.g., 2025-11-11T19:00:00Z"},
+                                "end_iso": {"type": "string", "description": "UTC ISO8601 end"},
+                            },
+                            "required": ["start_iso", "end_iso"],
+                        },
+                    }
+                },
+                "required": ["blocks"],
+            }
+        ),
+        mk_tool(
+            "availability_clear",
+            "Clear availability windows. If clear_all=true clear everything; otherwise optional start/end scope.",
+            {
+                "type": "object",
+                "properties": {
+                    "clear_all": {"type": "boolean", "default": False},
+                    "start_iso": {"type": "string"},
+                    "end_iso": {"type": "string"},
+                },
+            }
+        ),
+        mk_tool(
+            "availability_list",
+            "List future availability windows. For OWNER display, ALWAYS show each window’s label_local "
+            "(business timezone) instead of raw ISO times.",
+            {
+                "type": "object",
+                "properties": {
+                    "days_ahead": {"type": "integer", "default": 30},
+                },
+            }
+        ),
     ]
 
     loops = int(os.environ.get("MAX_TOOL_LOOPS","2"))
     tool_results = {}
 
     for _ in range(loops):
-        resp = openai_chat(msgs, functions)
-        msg = resp["choices"][0]["message"]
-        if msg.get("function_call"):
-            fn = msg["function_call"]["name"]
-            args = json.loads(msg["function_call"].get("arguments") or "{}")
+        resp_id, out_text, tool_calls, raw = openai_chat(
+            input_list=msgs,
+            tools=tools,
+            tool_choice=None,
+            instructions=instructions
+        )
 
-            # Owner tools
-            if fn == "availability_upsert":
-                result = availability_upsert(client, args.get("blocks") or [], owner_text=text)
-            elif fn == "availability_clear":
-                result = availability_clear(client, args.get("start_iso"), args.get("end_iso"), bool(args.get("clear_all")))
-            elif fn == "availability_list":
-                result = availability_list_pretty(client, int(args.get("days_ahead", 30)))
-            else:
-                result = {"ok": False, "error": f"unknown or unauthorized tool {fn}"}
+        logger.debug("orchestrate_owner: OpenAI response ID %s, output text: %s, tool calls: %s", resp_id, out_text, json.dumps(tool_calls))
+        logger.debug("orchestrate_owner: OpenAI raw.output response: %s", json.dumps(raw.get("output",[])))
+        # IMPORTANT: append model outputs back into the input list
+        # in our case we already have prior outputs on msgs, so just append function_call
+        for item in raw.get("output", []):
+            msgs.append(item)
 
-            tool_results[fn] = result
-            msgs.append({"role":"assistant","content":None,"function_call":msg["function_call"]})
-            msgs.append({"role":"function","name":fn,"content":json.dumps(result)})
+        if tool_calls:
+            for tc in tool_calls:
+                fn = tc["name"]
+                args = _safe_json(tc["arguments"], default={})
+
+                logger.info("orchestrate_owner: Tool call requested: %s with args %s", fn, json.dumps(args))
+
+                # Owner tools
+                if fn == "availability_upsert":
+                    result = availability_upsert(client, args.get("blocks") or [], owner_text=text)
+                elif fn == "availability_clear":
+                    result = availability_clear(
+                        client,
+                        args.get("start_iso"),
+                        args.get("end_iso"),
+                        bool(args.get("clear_all")),
+                    )
+                elif fn == "availability_list":
+                    result = availability_list_pretty(client, int(args.get("days_ahead", 30)))
+                else:
+                    result = {"ok": False, "error": f"unknown or unauthorized tool {fn}"}
+
+                tool_results[fn] = result
+
+                logger.debug("orchestrate_owner: Tool %s returned result: %s", fn, result)
+
+                # Append tool result in the correct format:
+                msgs.append({
+                    "type": "function_call_output",
+                    "call_id": tc["call_id"],
+                    "output": json.dumps(result),
+                })
+
             continue
 
         # final text
-        final = (msg.get("content") or "").strip()
-        if not final: break
-        return {"ok": True, "reply": clamp_for_channel(final, channel, max_reply_len), "tools": tool_results}
+        final = out_text #msg.get("content","").strip()
+        if not final:
+            break
 
+        return {"ok": True, "reply": clamp_for_channel(final, channel, max_reply_len), "tools": tool_results}
+    
     return {"ok": True, "reply": clamp_for_channel("Thanks—can you clarify?", channel, max_reply_len), "tools": tool_results}
 
 def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, message_sid: str | None, 
@@ -1563,13 +1707,13 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
     lead_rules = ""
     if client.get("lead_agent_enabled", False):
         logger.debug("orchestrate_user: Adding lead agent rules to system prompt")
-#        core, extra = _lead_defaults(client.get("lead_vertical","generic"))
         required = _parse_required_fields(client.get("lead_required_fields",""), client.get("lead_vertical","generic"))
         lead_rules = (
-            "- If the user asks for a quote/estimate/appointment/sales contact/human or you are unsure after one turn, "
-            "call the lead_agent_update function with any fields you can extract from chat history. "
+            "- If the user asks for a quote/estimate/sales contact/human or you are unsure after one turn, "
+            "call the lead_agent_update tool with any fields you can extract from chat history. "
             f"Required fields to capture (in order): {', '.join(required)}. "
-            f"Ask at most one concise question at a time (<= 300 chars) and at most {os.environ.get("LEAD_MAX_QUESTIONS", "3")} questions total.\n"
+            f"Ask at most one concise question at a time (<= 300 chars) and at most {os.environ.get("LEAD_MAX_QUESTIONS", "3")} questions total. "
+            f"After you have collected all required fields, DO NOT ask any more questions\n"
         )
 
     tz = _tz(client.get("timezone") or "America/New_York")
@@ -1586,10 +1730,12 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
     if client.get("scheduling_enabled", False):
         sched_rules = (
             "- If the user asks to book/schedule/reschedule/cancel or requests specific times, "
-            "use the scheduling functions: schedule_propose (to show 3 options), schedule_hold (to hold a chosen slot), "
+            "use the scheduling tools: schedule_propose (to show 3 options), schedule_hold (to hold a chosen slot), "
             "schedule_confirm (to confirm), schedule_cancel_hold (to cancel a held slot), "
             "schedule_cancel_appointment (to cancel a confirmed appointment). "
             "Keep replies short. If no times are available, use the lead agent.\n"
+            "Scheduling always uses scheduling tools. Lead agent is fallback only if no availability or user refuses link.\n"
+            "For any scheduling intent, you MUST call a scheduling tool and MUST NOT ask the user for times in free text.\n"
             "Scheduling rules:\n"
             "- If the user mentions dates/times like 'tomorrow', 'Thursday', 'evening', first call schedule_interpret and then call schedule_propose with the returned filters.\n"
             "- When proposing times, enumerate them as 1), 2), 3) with local dates/times.\n"
@@ -1616,249 +1762,206 @@ def orchestrate_user(client_id: str, channel: str, user_e164: str, text: str, me
         f"{missed_prelude}"
         f"- When unsure, ask a brief clarifying question.\n"
         f"- For SMS, keep replies as informative as possible but concise; avoid long lists.\n"
+        f"- The channel is {channel}. Adjust reply style accordingly.\n"
+        f"- DO NOT ask for opt-out keywords such as 'STOP', 'STOPALL', 'UNSUBSCRIBE', 'QUIT'.\n"
         f"- If user asks a general question, use the knowledge base tool.\n"
         f"- If user asks about hours, use the business hours tool.\n"
         f"{lead_rules}"
         f"{sched_rules}"
-        f"- If you cite info, reference the doc title when available.\n"
+        #f"- If you cite info, reference the doc title when available.\n"
         f"- Reply language should match user's message language when possible.\n"
         f"- Map common phrases to 'service_type' (examples): realtor: buying, selling, showing, listing consult; home services: estimate, repair, emergency, maintenance.\n"
     )
 
+    # no longer using system role, use instructions instead
+    #msgs = [mk_msg("system", system)]
+    instructions = system
+
+    # msgs used for chat history + current message and sent to OpenAI as input
+    msgs = []
     past_msgs, saw_current = fetch_recent_messages(client_id, user_e164, limit=history_max_turns, current_msg_sid=message_sid)
-    msgs = [{"role": "system", "content": system}]
     msgs.extend(past_msgs)
 
     # For missed_call kickoff, the user didn't send a text yet; seed a virtual user cue
     if (event or "").lower() == "missed_call" and not text:
         logger.debug("orchestrate_user: Seeding missed call user message into chat history")
         seed = "We missed your call."
-        msgs.append({"role": "user", "content": seed})
+        msgs.append(mk_msg("user", seed))
     elif not saw_current and text:
         logger.debug("orchestrate_user: Adding current user message to chat history")
         # Add the current user message if not already in history
-        msgs.append({"role": "user", "content": text})
+        msgs.append(mk_msg("user", text))
 
 
-    functions = [
-        {
-            "name": "search_kb",
-            "description": "Search the client's knowledge base for relevant answers.",
-            "parameters": {"type": "object","properties":{
-                "query":{"type":"string"},
-                "k":{"type":"integer","minimum":1,"maximum":8,"default":5}
-            },"required":["query"]}
-        },
-        {
-            "name": "get_business_hours",
-            "description": "Get the client's business hours string.",
-            "parameters": {"type":"object","properties":{}}
-        }
-     ]
+    tools = [
+        mk_tool(
+            "search_kb",
+            "Search the client's knowledge base for relevant answers.",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "k": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
+                },
+                "required": ["query"],
+            }
+        ),
+        mk_tool(
+            "get_business_hours",
+            "Get the client's business hours string.",
+            {"type": "object", "properties": {}}
+        ),
+    ]
 
     if client.get("lead_agent_enabled", False):
         logger.debug("orchestrate_user: Adding lead_agent_update function to available tools")
-        functions.append({
-            "name":"lead_agent_update",
-            "description":"Start/update lead capture with any fields you can extract. Keep values short.",
-            "parameters":{"type":"object","properties":{
-                "name":{"type":"string"},
-                "best_contact":{"type":"string"},
-                "request_summary":{"type":"string"},
-                "urgency":{"type":"string","enum":["low","medium","high"]},
-                "zip_or_city":{"type":"string"},
-                "buy_or_sell":{"type":"string","enum":["buy","sell","both"]},
-                "timeline":{"type":"string"},
-                "price_range":{"type":"string"},
-                "property_address":{"type":"string"},
-                "service_type":{"type":"string"},
-                "address":{"type":"string"},
-                "availability_window":{"type":"string"},
-                "photos_link":{"type":"string"}
-            }}
-        })
+        _add_lead_agent_functions(tools)
 
     # customer scheduling functions
     if client.get("scheduling_enabled", False):
-        functions.extend([
-            {
-                "name": "schedule_interpret",
-                "description": (
-                    "Interpret the user's natural-language scheduling request relative to NOW_LOCAL. "
-                    "Return a structured filter. Examples: 'tomorrow' => days_offset_start=1, days_offset_end=1; "
-                    "'Thursday morning' => weekday=THU, part_of_day='morning'; "
-                    "'next week' => next_week=true; 'this evening' => part_of_day='evening'."
-            ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                    "days_offset_start": {"type": "integer"},
-                    "days_offset_end": {"type": "integer"},
-                    "weekday": {"type": "string", "enum": ["MON","TUE","WED","THU","FRI","SAT","SUN"]},
-                    "local_date": {"type": "string", "description": "YYYY-MM-DD in BUSINESS TIMEZONE"},
-                    "part_of_day": {"type": "string", "enum": ["morning","afternoon","evening","night"]},
-                    "start_local_time": {"type": "string", "description": "HH:MM"},
-                    "end_local_time": {"type": "string", "description": "HH:MM"},
-                    "next_week": {"type": "boolean", "default": False}
-                    }
-                }
-            },
-            {
-                "name":"schedule_propose",
-                "description":"Propose up to 3 free time slots. Always call schedule_interpret first if the user mentions days/parts of day. Return explicit local dates.",
-                "parameters":{
-                "type":"object",
-                    "properties":{
-                        "local_date":{"type":"string"},
-                        "weekday":{"type":"string","enum":["MON","TUE","WED","THU","FRI","SAT","SUN"]},
-                        "part_of_day":{"type":"string","enum":["morning","afternoon","evening","night"]},
-                        "start_local_time":{"type":"string"},
-                        "end_local_time":{"type":"string"},
-                        "days_offset_start":{"type":"integer"},
-                        "days_offset_end":{"type":"integer"},
-                        "next_week":{"type":"boolean","default":False},
-                        "cursor_iso":{"type":"string"}
-                    }
-                }
-            },
-            {
-                "name":"schedule_more",
-                "description":"Get more options using the same filters as the last proposals (pagination).",
-                "parameters":{"type":"object","properties":{}}
-            },            {
-                "name":"schedule_hold",
-                "description":"Hold a chosen slot. ALWAYS pass 'slot_index' from the most recent proposals instead of constructing a date.",
-                "parameters":{
-                    "type":"object",
-                    "properties":{
-                        "slot_index":{"type":"integer","minimum":1},
-                        "slot_iso":{"type":"string"},  # legacy fallback
-                        "service_type":{"type":"string"},
-                        "notes":{"type":"string"}
-                    }
-                    # "anyOf":[{"required":["slot_index"]},{"required":["slot_iso"]}]
-                }
-            },
-            {
-                "name":"schedule_confirm",
-                "description":"Confirm the held slot.",
-                "parameters":{"type":"object","properties":{}}
-            },
-            {
-                "name":"schedule_set_details",
-                "description":"Attach details (service_type, notes, name) to the current hold if active; otherwise to the most recent confirmed appointment within 15 minutes.",
-                "parameters":{
-                    "type":"object",
-                    "properties":{
-                    "service_type":{"type":"string"},
-                    "notes":{"type":"string"},
-                    "user_name":{"type":"string"}
-                    }
-                }
-            },
-            {
-                "name":"schedule_cancel_hold",
-                "description":"Cancel a tentative hold (not a confirmed appointment). Use when a held slot should be released.",
-                "parameters":{"type":"object","properties":{}}
-            },
-            {
-                "name":"schedule_cancel_appointment",
-                "description":"Cancel a confirmed appointment. If 'appointment_id' is omitted, cancel the next upcoming confirmed appointment for this user.",
-                "parameters":{"type":"object","properties":{
-                    "appointment_id":{"type":"string"}
-                }}
-            },
-            {
-                "name":"schedule_reschedule_request",
-                "description":"Begin a reschedule flow. If appointment_id is provided, target that appointment; otherwise use the next upcoming confirmed appointment for this user. Do NOT cancel anything yet; we will cancel the old appointment automatically only after the new one is confirmed.",
-                "parameters":{"type":"object","properties":{
-                    "appointment_id":{"type":"string"}
-                }}
-            }
-        ])
+        logger.debug("orchestrate_user: Adding scheduling functions to available tools")
+        _add_schedule_functions(tools)
 
     logger.debug("orchestrate_user: Initial messages: %s", json.dumps(msgs))
 
     loops = int(os.environ.get("MAX_TOOL_LOOPS","2"))
     tool_results = {}
 
+    forced = None
+    if client.get("scheduling_enabled") and _looks_like_scheduling_intent(text):
+        forced = "schedule_interpret" if _has_relative_time_hint(text) else "schedule_propose"
+
     for _ in range(loops):
-        resp = openai_chat(msgs, functions)
-        choice = resp["choices"][0]
-        msg = choice["message"]
+        resp_id, out_text, tool_calls, raw = openai_chat(
+            input_list=msgs,
+            tools=tools,
+            tool_choice=forced,
+            instructions=instructions
+        )
 
-        logger.info("orchestrate_user: OpenAI response message: %s", msg)
+        logger.debug("orchestrate_user: OpenAI response ID %s, output text: %s, tool calls: %s", resp_id, out_text, json.dumps(tool_calls))
+        logger.debug("orchestrate_user: OpenAI output response: %s", json.dumps(raw.get("output",[])))
+        # IMPORTANT: append model outputs back into the input list
+        # in our case we already have prior outputs on msgs, so just append function_call
+        for item in raw.get("output", []):
+            msgs.append(item)
 
-        if msg.get("function_call"):
-            logger.debug("orchestrate_user: Model requested tool call: %s", msg["function_call"])
-            fn = msg["function_call"]["name"]
-            args = json.loads(msg["function_call"].get("arguments") or "{}")
+        if tool_calls:
+            for tc in tool_calls:
+                fn = tc["name"]
+                args = _safe_json(tc["arguments"], default={})
 
-            if fn == "search_kb":
-                q = args.get("query") or text
-                k = int(args.get("k", 5))
-                result = tool_search_kb(client_id, q, k)
-                logger.debug("orchestrate_user: search_kb result: %s", result)
-            elif fn == "get_business_hours":
-                result = tool_get_business_hours(client)
-                logger.debug("orchestrate_user: get_business_hours result: %s", result)
-            elif fn == "lead_agent_update" and client.get("lead_agent_enabled", False):
-                logger.debug("orchestrate_user: Calling lead_agent_update with args: %s", args)
-                result = lead_agent_update(client, user_e164, args)
-                logger.debug("orchestrate_user: lead_agent_update result: %s", result)
-            elif fn == "schedule_interpret" and client.get("scheduling_enabled", False):
-                logger.debug("orchestrate_user: Calling schedule_interpret with args: %s", args)
-                # purely LLM-side; just echo to the next step
-                result = {"ok": True, "filters": args}
-            elif fn == "schedule_propose" and client.get("scheduling_enabled", False):
-                logger.debug("orchestrate_user: Calling schedule_propose with args: %s", args)
-                r = schedule_propose(client, user_e164, args)  # args may be filters from interpret()
-                result = r
-                # SHORT-CIRCUIT reply with rendered list so model can't say "tomorrow" incorrectly
-                if r.get("rendered_list"):
-                    #return {"ok": True, "reply": clamp_for_channel(r["rendered_list"], channel, max_reply_len), "tools": tool_results}
-                    return {"ok": True, "reply": r["rendered_list"], "tools": tool_results}
+                logger.info("orchestrate_user: Tool call requested: %s with args %s", fn, json.dumps(args))
+                
+                # --- Scheduling link short-circuit (keep yours, but apply per tool call) ---
+                link = _scheduling_link_if_enabled(client)
+                if link and fn in {
+                    "schedule_interpret",
+                    "schedule_propose",
+                    "schedule_more",
+                    "schedule_set_details",
+                    "schedule_hold",
+                    "schedule_confirm",
+                    "schedule_cancel_hold",
+                    "schedule_cancel",
+                    "schedule_cancel_appointment",
+                    "schedule_reschedule_request",
+                }:
+                    logger.info(
+                        "orchestrate_user: scheduling_link present; bypassing %s for client_id=%s",
+                        fn, client.get("client_id")
+                    )
+                    reply = (
+                        "To book a time, please use this scheduling link:\n"
+                        f"{link}\n\n"
+                        "If you have trouble opening it, tell me and I’ll help."
+                    )
+                    return {"ok": True, "reply": reply, "tools": tool_results}
+
+                # ---- YOUR EXISTING DISPATCH LOGIC (minimal changes) ----
+                if fn == "search_kb":
+                    q = args.get("query") or text
+                    k = int(args.get("k", 5))
+                    result = tool_search_kb(client_id, q, k)
+
+                elif fn == "get_business_hours":
+                    result = tool_get_business_hours(client)
+
+                elif fn == "lead_agent_update" and client.get("lead_agent_enabled", False):
+                    result = lead_agent_update(client, user_e164, args)
+
+                elif fn == "schedule_interpret" and client.get("scheduling_enabled", False):
+                    result = {"ok": True, "filters": args}
+
+                    if ( forced ):
+                        forced = None  # clear forced after first use
+
+                elif fn == "schedule_propose" and client.get("scheduling_enabled", False):
+                    r = schedule_propose(client, user_e164, args)
+                    result = r
+                    
+                    if ( forced ):
+                        forced = None # clear forced after first use
+
+                    # keep short-circuit reply
+                    if r.get("rendered_list"):
+                        return {"ok": True, "reply": r["rendered_list"], "tools": tool_results}
+
+                elif fn == "schedule_more" and client.get("scheduling_enabled", False):
+                    r = schedule_more(client, user_e164)
+                    result = r
+                    if r.get("rendered_list"):
+                        return {"ok": True, "reply": r["rendered_list"], "tools": tool_results}
+
+                elif fn == "schedule_hold" and client.get("scheduling_enabled", False):
+                    result = schedule_hold(
+                        client, user_e164, args.get("slot_iso", ""),
+                        args.get("service_type"), args.get("notes"),
+                        slot_index=args.get("slot_index")
+                    )
+
+                elif fn == "schedule_confirm" and client.get("scheduling_enabled", False):
+                    result = schedule_confirm(client, user_e164)
+
+                elif fn == "schedule_set_details" and client.get("scheduling_enabled", False):
+                    result = schedule_set_details(
+                        client, user_e164,
+                        args.get("service_type"), args.get("notes"), args.get("user_name")
+                    )
+
+                elif fn == "schedule_cancel_hold" and client.get("scheduling_enabled", False):
+                    result = schedule_cancel_hold(client, user_e164)
+
+                elif fn == "schedule_cancel_appointment" and client.get("scheduling_enabled", False):
+                    result = schedule_cancel_appointment(client, user_e164, args.get("appointment_id"))
+
+                elif fn == "schedule_cancel" and client.get("scheduling_enabled", False):
+                    result = schedule_cancel_hold(client, user_e164)
+
+                elif fn == "schedule_reschedule_request" and client.get("scheduling_enabled", False):
+                    result = schedule_reschedule_request(client, user_e164, args.get("appointment_id"))
+
                 else:
-                    logger.debug("orchestrate_user: schedule_propose returned no rendered_list")
-        
-            elif fn == "schedule_more" and client.get("scheduling_enabled", False):
-                logger.debug("orchestrate_user: Calling schedule_more")
-                r = schedule_more(client, user_e164)
-                result = r
-                if r.get("rendered_list"):
-                    #return {"ok": True, "reply": clamp_for_channel(r["rendered_list"], channel, max_reply_len), "tools": tool_results}
-                    return {"ok": True, "reply": r["rendered_list"], "tools": tool_results}
-                else:
-                    logger.debug("orchestrate_user: schedule_more returned no rendered_list")
-            elif fn == "schedule_hold" and client.get("scheduling_enabled", False):
-                result = schedule_hold(client, user_e164, args.get("slot_iso",""), 
-                                       args.get("service_type"), args.get("notes"),
-                                       slot_index=args.get("slot_index"))
-            elif fn == "schedule_confirm" and client.get("scheduling_enabled", False):
-                result = schedule_confirm(client, user_e164)
-            elif fn == "schedule_set_details" and client.get("scheduling_enabled", False):
-                result = schedule_set_details(client, user_e164, args.get("service_type"), args.get("notes"), args.get("user_name"))
-            elif fn == "schedule_cancel_hold" and client.get("scheduling_enabled", False):
-                result = schedule_cancel_hold(client, user_e164)
-            elif fn == "schedule_cancel_appointment" and client.get("scheduling_enabled", False):
-                result = schedule_cancel_appointment(client, user_e164, args.get("appointment_id"))
-            # --- Back-compat: if model calls legacy name, route to hold-cancel ---
-            elif fn == "schedule_cancel" and client.get("scheduling_enabled", False):
-                result = schedule_cancel_hold(client, user_e164)
-            elif fn == "schedule_reschedule_request" and client.get("scheduling_enabled", False):
-                result = schedule_reschedule_request(client, user_e164, args.get("appointment_id"))
-            else:
-                logger.warning("orchestrate_user: Unknown tool requested: %s", fn)   
-                result = {"ok": False, "error": f"unknown tool {fn}"}
+                    logger.warning("orchestrate_user: Unknown tool requested: %s", fn)
+                    result = {"ok": False, "error": f"unknown tool {fn}"}
 
-            logger.debug("orchestrate_user: Tool %s returned result: %s", fn, result)
-            tool_results[fn] = result
-            msgs.append({"role":"assistant","content":None,"function_call":msg["function_call"]})
-            msgs.append({"role":"function","name":fn,"content":json.dumps(result)})
+                # Track results (keep your dict)
+                tool_results[fn] = result
+
+                logger.debug("orchestrate_user: Tool %s returned result: %s", fn, result)
+
+                # Append tool result in the correct format:
+                msgs.append({
+                    "type": "function_call_output",
+                    "call_id": tc["call_id"],
+                    "output": json.dumps(result),
+                })
+
+            # Continue the loop: call OpenAI again with tool outputs appended
             continue
-
+ 
         # Model produced a final answer
-        final = msg.get("content","").strip()
+        final = out_text #msg.get("content","").strip()
         logger.debug("orchestrate_user: Model produced final content: %s", final)
         if not final:
             break
@@ -1912,3 +2015,122 @@ def lambda_handler(event, context):
 
     result = orchestrate(client_id, channel, user_e164, text, message_sid, event=event_name, transcript=transcript, role=role)
     return {"statusCode": 200, "headers": JSON, "body": json.dumps(result)}
+
+def _add_lead_agent_functions(functions):
+    functions.append(
+        mk_tool(
+            "lead_agent_update",
+            "Start/update lead capture with any fields you can extract. Keep values short.",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "best_contact": {"type": "string"},
+                    "request_summary": {"type": "string"},
+                    "urgency": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "zip_or_city": {"type": "string"},
+                    "buy_or_sell": {"type": "string", "enum": ["buy", "sell", "both"]},
+                    "timeline": {"type": "string"},
+                    "price_range": {"type": "string"},
+                    "property_address": {"type": "string"},
+                    "service_type": {"type": "string"},
+                    "address": {"type": "string"},
+                    "availability_window": {"type": "string"},
+                    "photos_link": {"type": "string"}
+                }
+            }
+        )
+    )
+
+def _add_schedule_functions(functions):
+        functions.extend([
+            mk_tool(
+                "schedule_interpret",
+                "Interpret the user's natural-language scheduling request relative to NOW_LOCAL. "
+                "Return a structured filter. Examples: 'tomorrow' => days_offset_start=1, days_offset_end=1; "
+                "'Thursday morning' => weekday=THU, part_of_day='morning'; "
+                "'next week' => next_week=true; 'this evening' => part_of_day='evening'.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "days_offset_start": {"type": "integer"},
+                        "days_offset_end": {"type": "integer"},
+                        "weekday": {"type": "string", "enum": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]},
+                        "local_date": {"type": "string", "description": "YYYY-MM-DD in BUSINESS TIMEZONE"},
+                        "part_of_day": {"type": "string", "enum": ["morning", "afternoon", "evening", "night"]},
+                        "start_local_time": {"type": "string", "description": "HH:MM"},
+                        "end_local_time": {"type": "string", "description": "HH:MM"},
+                        "next_week": {"type": "boolean", "default": False}
+                    }
+                }
+            ),
+            mk_tool(
+                "schedule_propose",
+                "Propose up to 3 free time slots. Always call schedule_interpret first if the user mentions days/parts of day. Return explicit local dates.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "local_date": {"type": "string"},
+                        "weekday": {"type": "string", "enum": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]},
+                        "part_of_day": {"type": "string", "enum": ["morning", "afternoon", "evening", "night"]},
+                        "start_local_time": {"type": "string"},
+                        "end_local_time": {"type": "string"},
+                        "days_offset_start": {"type": "integer"},
+                        "days_offset_end": {"type": "integer"},
+                        "next_week": {"type": "boolean", "default": False},
+                        "cursor_iso": {"type": "string"}
+                    }
+                }
+            ),
+            mk_tool(
+                "schedule_more",
+                "Get more options using the same filters as the last proposals (pagination).",
+                {"type": "object", "properties": {}}
+            ),
+            mk_tool(
+                "schedule_hold",
+                "Hold a chosen slot. ALWAYS pass 'slot_index' from the most recent proposals instead of constructing a date.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "slot_index": {"type": "integer", "minimum": 1},
+                        "slot_iso": {"type": "string"},
+                        "service_type": {"type": "string"},
+                        "notes": {"type": "string"}
+                    }
+                }
+            ),
+            mk_tool(
+                "schedule_confirm",
+                "Confirm the held slot.",
+                {"type": "object", "properties": {}}
+            ),
+            mk_tool(
+                "schedule_set_details",
+                "Attach details (service_type, notes, name) to the current hold if active; otherwise to the most recent confirmed appointment within 15 minutes.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "service_type": {"type": "string"},
+                        "notes": {"type": "string"},
+                        "user_name": {"type": "string"}
+                    }
+                }
+            ),
+            mk_tool(
+                "schedule_cancel_hold",
+                "Cancel a tentative hold (not a confirmed appointment). Use when a held slot should be released.",
+                {"type": "object", "properties": {}}
+            ),
+            mk_tool(
+                "schedule_cancel_appointment",
+                "Cancel a confirmed appointment. If 'appointment_id' is omitted, cancel the next upcoming confirmed appointment for this user.",
+                {"type": "object", "properties": {"appointment_id": {"type": "string"}}}
+            ),
+            mk_tool(
+                "schedule_reschedule_request",
+                "Begin a reschedule flow. If appointment_id is provided, target that appointment; otherwise use the next upcoming confirmed appointment for this user. Do NOT cancel anything yet; we will cancel the old appointment automatically only after the new one is confirmed.",
+                {"type": "object", "properties": {"appointment_id": {"type": "string"}}}
+            ),
+        ])
+
